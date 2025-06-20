@@ -1,13 +1,29 @@
+# Copyright 2024 Ant Group Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
 import os
 import platform
 import posixpath
 import re
 import shutil
+import subprocess
 import sys
+import time
+from datetime import date
 from pathlib import Path
 from typing import List
-from datetime import date
 
 import setuptools
 from setuptools import find_packages, setup
@@ -15,25 +31,45 @@ from setuptools.command import build_ext
 
 this_directory = os.path.abspath(os.path.dirname(__file__))
 
-if os.getcwd() != this_directory:
-    print("You must run setup.py from the project root")
-    exit(-1)
+
+def get_commit_id() -> str:
+    commit_id = (
+        subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+    )
+    dirty = subprocess.check_output(['git', 'diff', '--stat']).decode('ascii').strip()
+
+    if dirty:
+        commit_id = f"{commit_id}-dirty"
+
+    return commit_id
 
 
-def add_date_to_version(*filepath):
+def complete_version_file(custom_feature, *filepath):
     today = date.today()
     dstr = today.strftime("%Y%m%d")
     with open(os.path.join(".", *filepath), "r") as fp:
         content = fp.read()
 
     content = content.replace("$$DATE$$", dstr)
+    content = content.replace("$$BUILD_TIME$$", time.strftime('%b %d %Y, %X'))
+    try:
+        content = content.replace("$$COMMIT_ID$$", get_commit_id())
+    except:
+        pass
+
+    if "SF_BUILD_DOCKER_NAME" in os.environ:
+        content = content.replace(
+            "$$DOCKER_VERSION$$", os.environ["SF_BUILD_DOCKER_NAME"]
+        )
+    if custom_feature != "lite":
+        content = content.replace('"lite"', '"full"')
 
     with open(os.path.join(".", *filepath), "w+") as fp:
         fp.write(content)
 
 
-def find_version(*filepath):
-    add_date_to_version(*filepath)
+def find_version(custom_feature, *filepath):
+    complete_version_file(custom_feature, *filepath)
     # Extract version information from filepath
     with open(os.path.join(".", *filepath)) as fp:
         version_match = re.search(
@@ -54,7 +90,7 @@ def filter_requirements(requirements: List[str], custom_feature: str):
             continue
 
         comment = r[comment_symbol_idx + 1 :]
-        feature_match = re.search(r"FEATURE=\[([0-9A-Za-z,]+)\]", comment)
+        feature_match = re.search(r"FEATURE=\[([0-9A-Za-z,_]+)\]", comment)
         if not feature_match:
             continue
         features = feature_match.group(1).split(",")
@@ -153,12 +189,17 @@ class BuildBazelExtension(build_ext.build_ext):
 def plat_name():
     # Default Linux platform tag
     plat_name = "manylinux2014_x86_64"
+
     if sys.platform == "darwin":
-        # Due to a bug in conda x64 python, platform tag has to be 10_16 for X64 wheel
+        # macOS platform detection
         if platform.machine() == "x86_64":
-            plat_name = "macosx_10_16_x86_64"
+            plat_name = "macosx_12_0_x86_64"
         else:
-            plat_name = "macosx_11_0_arm64"
+            plat_name = "macosx_12_0_arm64"
+    elif sys.platform.startswith("linux"):
+        # Linux platform detection
+        if platform.machine() == "aarch64":
+            plat_name = "manylinux_2_28_aarch64"
 
     return plat_name
 
@@ -168,68 +209,83 @@ def long_description():
         return f.read()
 
 
-argparser = argparse.ArgumentParser()
-argparser.add_argument(
-    "--lite", action="store_true", help="Build SecretFlow lite", required=False
-)
-args, unknowns = argparser.parse_known_args()
-sys.argv = [sys.argv[0]] + unknowns
+if __name__ == "__main__":
+    if os.getcwd() != this_directory:
+        print("You must run setup.py from the project root")
+        exit(-1)
 
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument(
+        "--lite", action="store_true", help="Build SecretFlow lite", required=False
+    )
+    args, unknowns = argparser.parse_known_args()
+    sys.argv = [sys.argv[0]] + unknowns
 
-package_name = "secretflow"
-description = "SecretFlow"
-# Feature is used to filter the requirements.
-custom_feature = None
+    package_name = "secretflow"
+    description = "SecretFlow"
+    # Feature is used to filter the requirements.
+    custom_feature = None
 
+    pkg_exclude_list = [
+        "examples",
+        "examples.*",
+        "tests",
+        "tests.*",
+    ]
 
-if args.lite:
-    """
-    The primary distinction between secretflow-lite and non-lite lies in
-    the inclusion of traditional machine learning only. Specifically, lite
-    does not incorporate deep learning dependency packages due to their
-    significant size.
-    """
-    package_name = "secretflow-lite"
-    custom_feature = "lite"
-    description = "SecretFlow Lite"
+    entry_points = {
+        "console_scripts": ["secretflow = secretflow.cli:cli"],
+    }
+    package_data = {'secretflow': ['component/translation.json']}
+    ext_modules = None
 
-install_requires, dependency_links = read_requirements(custom_feature)
+    if args.lite:
+        """
+        The primary distinction between secretflow-lite and non-lite lies in
+        the inclusion of traditional machine learning only. Specifically, lite
+        does not incorporate deep learning dependency packages due to their
+        significant size.
+        """
+        package_name = "secretflow-lite"
+        custom_feature = "lite"
+        description = "SecretFlow Lite"
+        pkg_exclude_list.extend(
+            ["secretflow_fl", "secretflow_fl.*"]
+        )  # exclude secretflow_fl in lite version
+    else:
+        package_name = "secretflow"
+        description = "SecretFlow Full"
+        entry_points['secretflow_plugins'] = ['secretflow_fl = secretflow_fl.component']
+        package_data["secretflow_fl"] = ['component/translation.json']
+        ext_modules = [
+            BazelExtension(
+                "//secretflow_lib/binding:_lib", "secretflow_fl/security/privacy/_lib"
+            ),
+        ]
 
-setup(
-    name=package_name,
-    version=find_version("secretflow", "version.py"),
-    license="Apache 2.0",
-    description=description,
-    long_description=long_description(),
-    long_description_content_type="text/markdown",
-    author="SCI Center",
-    author_email="secretflow-contact@service.alipay.com",
-    url="https://github.com/secretflow/secretflow",
-    packages=find_packages(
-        exclude=(
-            "examples",
-            "examples.*",
-            "tests",
-            "tests.*",
-        )
-    ),
-    install_requires=install_requires,
-    ext_modules=[
-        BazelExtension(
-            "//secretflow_lib/binding:_lib", "secretflow/security/privacy/_lib"
+    install_requires, dependency_links = read_requirements(custom_feature)
+
+    setup(
+        name=package_name,
+        version=find_version(custom_feature, "secretflow", "version.py"),
+        license="Apache 2.0",
+        description=description,
+        long_description=long_description(),
+        long_description_content_type="text/markdown",
+        author="SCI Center",
+        author_email="secretflow-contact@service.alipay.com",
+        url="https://github.com/secretflow/secretflow",
+        packages=find_packages(exclude=pkg_exclude_list),
+        package_data=package_data,
+        install_requires=install_requires,
+        ext_modules=ext_modules,
+        extras_require={"dev": ["pylint"]},
+        cmdclass=dict(
+            build_ext=BuildBazelExtension, clean=CleanCommand, cleanall=CleanCommand
         ),
-    ],
-    extras_require={"dev": ["pylint"]},
-    cmdclass=dict(
-        build_ext=BuildBazelExtension, clean=CleanCommand, cleanall=CleanCommand
-    ),
-    dependency_links=dependency_links,
-    options={
-        "bdist_wheel": {"plat_name": plat_name()},
-    },
-    entry_points={
-        "console_scripts": [
-            "secretflow = secretflow.cli:cli",
-        ],
-    },
-)
+        dependency_links=dependency_links,
+        options={
+            "bdist_wheel": {"plat_name": plat_name()},
+        },
+        entry_points=entry_points,
+    )

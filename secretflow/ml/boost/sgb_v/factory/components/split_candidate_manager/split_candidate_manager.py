@@ -15,10 +15,11 @@
 from typing import List, Tuple
 
 import numpy as np
+
 from secretflow.ml.boost.sgb_v.factory.sgb_actor import SGBActor
 
-from .split_candidate_heap import SplitCandidateHeap
 from ..component import Component, Devices
+from .split_candidate_heap import SplitCandidateHeap
 
 
 class SplitCandidateManager(Component):
@@ -97,8 +98,8 @@ class SplitCandidateManager(Component):
     def is_no_candidate_left(self) -> bool:
         return self.heap.invoke_class_method('SplitCandidateHeap', 'is_heap_empty')
 
-    def extract_best_split_info(self) -> Tuple[int, np.ndarray, int]:
-        return self.heap.invoke_class_method_three_ret(
+    def extract_best_split_info(self) -> Tuple[int, np.ndarray, int, float]:
+        return self.heap.invoke_class_method_four_ret(
             'SplitCandidateHeap', 'extract_best_split_info'
         )
 

@@ -25,28 +25,32 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum, unique
+from threading import Lock
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple, Union
 
-import fed
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-import ray
 import spu
 import spu.libspu.link as spu_link
 import spu.libspu.logging as spu_logging
 import spu.utils.frontend as spu_fe
 from google.protobuf import json_format
 from heu import phe
-from spu import pir, psi, spu_pb2
+from spu import psi, spu_pb2
 from spu.utils.distributed import dtype_spu_to_np, shape_spu_to_np
 
 import secretflow.distributed as sfd
+from secretflow.distributed import FED_OBJECT_TYPES
+from secretflow.distributed.ray_op import get_obj_ref
+from secretflow.error_system.exceptions import InternalError
+from secretflow.utils import secure_pickle as pickle
 from secretflow.utils.errors import InvalidArgumentError
 from secretflow.utils.ndarray_bigint import BigintNdArray
 from secretflow.utils.progress import ProgressData
 
+from ._utils import get_fn_code_name
 from .base import Device, DeviceObject, DeviceType
 from .pyu import PYUObject
 from .register import dispatch
@@ -62,6 +66,12 @@ _LINK_DESC_NAMES = [
     'brpc_channel_protocol',
     'brpc_channel_connection_type',
 ]
+
+SPU_PROTOCOLS_MAP = {
+    spu.spu_pb2.SEMI2K: 'semi2k',
+    spu.spu_pb2.CHEETAH: 'cheetah',
+    spu.spu_pb2.ABY3: 'aby3',
+}
 
 
 def _fill_link_ssl_opts(tls_opts: Dict, link_ssl_opts: spu_link.SSLOptions):
@@ -153,8 +163,8 @@ class SPUObject(DeviceObject):
     def __init__(
         self,
         device: Device,
-        meta: Union[ray.ObjectRef, fed.FedObject],
-        shares_name: Sequence[Union[ray.ObjectRef, fed.FedObject]],
+        meta: FED_OBJECT_TYPES,
+        shares_name: Sequence[FED_OBJECT_TYPES],
     ):
         """SPUObject refers to a Python Object which could be flattened to a
         list of SPU Values. An SPU value is a Numpy array or equivalent.
@@ -175,8 +185,8 @@ class SPUObject(DeviceObject):
         would only happen when SPU device consumes SPU objects.
 
         Args:
-            meta: Union[ray.ObjectRef, fed.FedObject]: Ref to the metadata.
-            shares_name: Sequence[Union[ray.ObjectRef, fed.FedObject]]: names of shares of data in each SPU node.
+            meta: FED_OBJECT_TYPES: Ref to the metadata.
+            shares_name: Sequence[FED_OBJECT_TYPES]: names of shares of data in each SPU node.
         """
         super().__init__(device)
         self.meta = meta
@@ -188,7 +198,7 @@ class SPUObject(DeviceObject):
             for i, actor in enumerate(self.device.actors.values()):
                 try:
                     actor.del_share.remote(self.shares_name[i])
-                except TypeError:
+                except Exception:
                     # Python doesn't make any guarantees about when __del__ is called,
                     # actor may not exist, been GCed before this function called.
                     # This may happened when Host(Driver) progress exit.
@@ -393,6 +403,7 @@ class SPURuntime:
             ]
 
             name = self.get_new_share_name()
+            logging.debug(f"new share name {name}, RT {id(self.runtime)}")
             self.runtime.set_var(name, share)
             shares_name.append(name)
 
@@ -434,29 +445,38 @@ class SPURuntime:
         flatten_names, _ = jax.tree_util.tree_flatten(val)
         for name in flatten_names:
             assert isinstance(name, str)
+            logging.debug(f"del share name {name}, RT {id(self.runtime)}")
             self.runtime.del_var(name)
 
-    def dump(self, meta: Any, val: Any, path: str):
+    def dump(self, meta: Any, val: Any, path: Union[str, Callable]):
         flatten_names, _ = jax.tree_util.tree_flatten(val)
         shares = []
         for name in flatten_names:
             shares.append(self.runtime.get_var(name))
 
-        import cloudpickle as pickle
-        from pathlib import Path
+        if isinstance(path, str):
+            from pathlib import Path
 
-        # create parent folders.
-        file = Path(path)
-        file.parent.mkdir(parents=True, exist_ok=True)
+            # create parent folders.
+            file = Path(path)
+            file.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'wb') as f:
+                pickle.dump({'meta': meta, 'shares': shares}, f)
+        else:
+            assert callable(path)
+            with path() as w:
+                pickle.dump({'meta': meta, 'shares': shares}, w)
 
-        with open(path, 'wb') as f:
-            pickle.dump({'meta': meta, 'shares': shares}, f)
+        return None
 
-    def load(self, path: str) -> Any:
-        import cloudpickle as pickle
-
-        with open(path, 'rb') as f:
-            record = pickle.load(f)
+    def load(self, path: Union[str, Callable]) -> Any:
+        if isinstance(path, str):
+            with open(path, 'rb') as f:
+                record = pickle.load(f, filter_type=pickle.FilterType.BLACKLIST)
+        else:
+            assert callable(path)
+            with path() as f:
+                record = pickle.load(f, filter_type=pickle.FilterType.BLACKLIST)
 
         meta = record['meta']
         shares = record['shares']
@@ -489,6 +509,8 @@ class SPURuntime:
             List: first parts are output vars following the exec.output_names. The last item is metadata.
         """
 
+        logging.debug(f"SPU({id(self)}) try running {executable.name}")
+
         flatten_names, _ = jax.tree_util.tree_flatten(val)
         assert len(executable.input_names) == len(flatten_names)
 
@@ -500,6 +522,7 @@ class SPURuntime:
 
         executable.output_names[:] = output_names
 
+        logging.debug(f"SPU({id(self)}) running {executable.name} with {flatten_names}")
         self.runtime.run(executable)
 
         metadata = []
@@ -515,6 +538,10 @@ class SPURuntime:
                     self.conf.fxp_fraction_bits,
                 )
             )
+
+        logging.debug(
+            f"SPU({id(self)}) finished {executable.name} output {output_names}"
+        )
 
         if num_returns_policy == SPUCompilerNumReturnsPolicy.SINGLE:
             _, out_tree = jax.tree_util.tree_flatten(out_shape)
@@ -1150,12 +1177,18 @@ class SPURuntime:
             pos_str = str(table_columns.get_loc(ele) + 1)
             idlist.append(f"--key={pos_str},{pos_str}")
         idstr = ' '.join(idlist)
-        sort_cmd = f'tail -n +2 {output_notsort} | LC_ALL=C sort --buffer-size=2G --parallel=8 --temporary-directory=./ --stable --field-separator=, {idstr} >>{output_path}'
-        logging.info(f"sort_cmd:{sort_cmd}")
-        sp_ret = subprocess.run(sort_cmd, shell=True)
-        assert (
-            sp_ret.returncode == 0
-        ), f"sort cmd failed, return {sp_ret.returncode}, expected 0"
+
+        with open(output_path, "a") as out_file:
+            tail = subprocess.Popen(
+                ("tail", "-n", "+2", output_notsort), stdout=subprocess.PIPE
+            )
+            sort_env = os.environ.copy()
+            sort_env["LC_ALL"] = "C"
+            sort_cmd = f"sort --buffer-size=2G --parallel=8 --temporary-directory=./ --stable --field-separator=, {idstr}".split()
+            subprocess.check_call(
+                sort_cmd, env=sort_env, stdin=tail.stdout, stdout=out_file
+            )
+            tail.wait()
 
         # delete tmp data dir
         data_dir.cleanup()
@@ -1170,346 +1203,137 @@ class SPURuntime:
             'join_count': join_count,
         }
 
-    def pir_setup(
+    def ub_psi(
         self,
-        server: str,
+        mode: str,
+        role: str,
         input_path: str,
-        key_columns: Union[str, List[str]],
-        label_columns: Union[str, List[str]],
-        oprf_key_path: str,
-        setup_path: str,
-        num_per_query: int,
-        label_max_len: int,
-        protocol="KEYWORD_PIR_LABELED_PSI",
+        keys: List[str],
+        server_secret_key_path: str,
+        cache_path: str,
+        server_get_result: bool,
+        client_get_result: bool,
+        disable_alignment: bool,
+        output_path: str,
+        join_type: str,
+        left_side: str,
+        null_rep: str,
     ):
-        """Private information retrival offline setup phase.
+        """Unbalanced PSI.
         Args:
-            server (str): Which party is pir server.
-            input_path (str): Server's CSV file path. comma separated and contains header.
-                Use an absolute path.
-            key_columns (str, List[str]): Column(s) used as pir key
-            label_columns (str, List[str]): Column(s) used as pir label
-            oprf_key_path (str): Ecc oprf secret key path, 32B binary format.
-                Use an absolute path.
-            setup_path (str): Offline/Setup phase output data dir. Use an absolute path.
-            num_per_query (int): Items number per query.
-            label_max_len (int): Max number bytes of label, padding data to label_max_len
-                Max label bytes length add 4 bytes(len).
+            mode (str): Mode of psi. One of [
+                MODE_UNSPECIFIED,
+                MODE_OFFLINE_GEN_CACHE,
+                MODE_OFFLINE_TRANSFER_CACHE,
+                MODE_OFFLINE,
+                MODE_ONLINE,
+                MODE_FULL
+            ]
+            role (str): Role of psi. one of [
+                ROLE_SERVER,
+                ROLE_CLIENT,
+            ]
+            input_path (str): Input path of psi.
+            keys (List[str]): Keys of psi.
+            server_secret_key_path (str): Server secret key path of psi.
+            cache_path (str): Cache path of psi.
+            server_get_result (bool): Server get result of psi.
+            client_get_result (bool): Client get result of psi.
+            disable_alignment (bool): Disable alignment of psi.
+            output_path (str): Output path of psi.
         Returns:
-            Dict: PIR report output by SPU.
+            Dict: PSI report output by SPU.
         """
-        if isinstance(key_columns, str):
-            key_columns = [key_columns]
+        config = spu.psi_v2_pb2.UbPsiConfig(
+            mode=spu.psi_v2_pb2.UbPsiConfig.Mode.Value(mode),
+            role=spu.psi_v2_pb2.Role.Value(role),
+            input_config=spu.psi_v2_pb2.IoConfig(
+                type=spu.psi_v2_pb2.IO_TYPE_FILE_CSV,
+                path=input_path,
+            ),
+            keys=keys,
+            server_secret_key_path=server_secret_key_path,
+            cache_path=cache_path,
+            server_get_result=server_get_result,
+            client_get_result=client_get_result,
+            disable_alignment=disable_alignment,
+            output_config=spu.psi_v2_pb2.IoConfig(
+                type=spu.psi_v2_pb2.IO_TYPE_FILE_CSV,
+                path=output_path,
+            ),
+            advanced_join_type=spu.psi_v2_pb2.PsiConfig.AdvancedJoinType.Value(
+                join_type
+            ),
+            left_side=spu.psi_v2_pb2.Role.Value(left_side),
+            output_attr=spu.psi_v2_pb2.OutputAttr(csv_null_rep=null_rep),
+        )
+        report = spu.psi.ub_psi(config, self.link)
+        return {
+            'party': self.party,
+            'original_count': report.original_count,
+            'intersection_count': report.intersection_count,
+        }
 
-        if isinstance(label_columns, str):
-            label_columns = [label_columns]
-
-        party = self.cluster_def['nodes'][self.rank]['party']
-        server_rank = -1
-        for i, node in enumerate(self.cluster_def['nodes']):
-            if node['party'] == server:
-                server_rank = i
-                break
-        assert server_rank >= 0, f'invalid server: {server}'
-        if server_rank != self.rank:
-            return {
-                'party': party,
-                'data_count': 0,
-            }
-
-        config = pir.PirSetupConfig(
-            pir_protocol=pir.PirProtocol.Value(protocol),
-            store_type=pir.KvStoreType.Value("LEVELDB_KV_STORE"),
-            input_path=input_path,
-            key_columns=key_columns,
-            label_columns=label_columns,
-            num_per_query=num_per_query,
-            label_max_len=label_max_len,
-            oprf_key_path=oprf_key_path,
-            setup_path=setup_path,
+    def psi(
+        self,
+        keys: List[str],
+        input_path: str,
+        output_path: str,
+        receiver: str,
+        table_keys_duplicated: bool,
+        output_csv_na_rep: str,
+        broadcast_result: bool = True,
+        protocol: str = 'PROTOCOL_KKRT',
+        ecdh_curve: str = 'CURVE_FOURQ',
+        advanced_join_type: str = "ADVANCED_JOIN_TYPE_UNSPECIFIED",
+        left_side: str = "ROLE_RECEIVER",
+        skip_duplicates_check: bool = False,
+        disable_alignment: bool = False,
+        check_hash_digest: bool = False,
+    ):
+        config = spu.psi_v2_pb2.PsiConfig(
+            protocol_config=spu.psi_v2_pb2.ProtocolConfig(
+                protocol=spu.psi_v2_pb2.Protocol.Value(protocol),
+                role=(
+                    spu.psi_v2_pb2.ROLE_RECEIVER
+                    if receiver == self.party
+                    else spu.psi_v2_pb2.ROLE_SENDER
+                ),
+                broadcast_result=broadcast_result,
+            ),
+            input_config=spu.psi_v2_pb2.IoConfig(
+                type=spu.psi_v2_pb2.IO_TYPE_FILE_CSV,
+                path=input_path,
+            ),
+            output_config=spu.psi_v2_pb2.IoConfig(
+                type=spu.psi_v2_pb2.IO_TYPE_FILE_CSV,
+                path=output_path,
+            ),
+            input_attr=spu.psi_v2_pb2.InputAttr(
+                keys_unique=not table_keys_duplicated,
+            ),
+            output_attr=spu.psi_v2_pb2.OutputAttr(csv_null_rep=output_csv_na_rep),
+            keys=keys,
+            advanced_join_type=spu.psi_v2_pb2.PsiConfig.AdvancedJoinType.Value(
+                advanced_join_type
+            ),
+            left_side=spu.psi_v2_pb2.Role.Value(left_side),
+            skip_duplicates_check=skip_duplicates_check,
+            disable_alignment=disable_alignment,
+            check_hash_digest=check_hash_digest,
         )
 
-        report = pir.pir_setup(config)
+        if protocol == 'PROTOCOL_ECDH':
+            config.protocol_config.ecdh_config.curve = spu.psi_pb2.CurveType.Value(
+                ecdh_curve
+            )
+
+        report = spu.psi.psi(config, self.link)
 
         return {
-            'party': party,
-            'data_count': report.data_count,
-        }
-
-    def pir_query(
-        self,
-        server: str,
-        config: Dict,
-        protocol="KEYWORD_PIR_LABELED_PSI",
-    ):
-        """Private information retrival online query phase.
-        Args:
-            server (str): Which party is pir server.
-            config (dict): Server/Client config dict
-                For example:
-
-                .. code:: python
-
-                    {
-                        # client config
-                        alice: {
-                            'input_path': '/path/intput.csv',
-                            'key_columns': 'id',
-                            'output_path': '/path/output.csv',
-                        },
-                        # server config
-                        bob: {
-                            'oprf_key_path': '/path/oprf_key.bin',
-                            'setup_path': '/path/setup_dir',
-                        },
-                    }
-
-                server config dict must have:
-                    'oprf_key_path','setup_path'
-                    oprf_key_path (str): Ecc oprf secret key path, 32B binary format.
-                        Use an absolute path.
-                    setup_path (str): Offline/Setup phase output data dir. Use an absolute path.
-                client config dict must have:
-                    'input_path','key_columns', 'output_path'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    output_path (str): Query result save to output_path, csv format.
-        Returns:
-            Dict: PIR report output by SPU.
-        """
-
-        pir_client_config_names = [
-            'input_path',
-            'key_columns',
-            'output_path',
-        ]
-        pir_server_config_names = [
-            'oprf_key_path',
-            'setup_path',
-        ]
-
-        party = self.cluster_def['nodes'][self.rank]['party']
-        server_rank = -1
-        for i, node in enumerate(self.cluster_def['nodes']):
-            if node['party'] == server:
-                server_rank = i
-                break
-        assert server_rank >= 0, f'invalid server: {server}'
-
-        if self.rank == server_rank:
-            # check config dict
-            for name, value in config.items():
-                assert (
-                    isinstance(name, str) and name
-                ), f'Link desc param name shall be a valid string but got {type(name)}.'
-                if name not in pir_server_config_names:
-                    raise InvalidArgumentError(
-                        f'Unsupported param {name} in pir server config desc, '
-                        f'{pir_server_config_names} are now available only.'
-                    )
-
-            for name in pir_server_config_names:
-                if name not in config.keys():
-                    raise InvalidArgumentError(
-                        f'param {name} must in pir server config'
-                    )
-
-            packed_bytes = struct.pack('?is', True, 1, b'\x00')
-            self.link.send(self.link.next_rank(), packed_bytes)
-            logging.info(f"rank:{self.rank} send {len(packed_bytes)} sync status")
-
-            config = pir.PirServerConfig(
-                pir_protocol=pir.PirProtocol.Value(protocol),
-                store_type=pir.KvStoreType.Value("LEVELDB_KV_STORE"),
-                oprf_key_path=config['oprf_key_path'],
-                setup_path=config['setup_path'],
-            )
-            report = pir.pir_server(self.link, config)
-
-        else:
-            # check config dict
-            for name, value in config.items():
-                assert (
-                    isinstance(name, str) and name
-                ), f'Link desc param name shall be a valid string but got {type(name)}.'
-                if name not in pir_client_config_names:
-                    raise InvalidArgumentError(
-                        f'Unsupported param {name} in pir client config desc, '
-                        f'{pir_client_config_names} are now available only.'
-                    )
-
-            for name in pir_client_config_names:
-                if name not in config.keys():
-                    raise InvalidArgumentError(
-                        f'param {name} must in pir client config'
-                    )
-
-            if isinstance(config['key_columns'], str):
-                key_columns = [config['key_columns']]
-            elif isinstance(config['key_columns'], List):
-                key_columns = config['key_columns']
-
-            recv_bytes = self.link.recv(self.link.next_rank())
-            logging.info(f"rank:{self.rank} recv {len(recv_bytes)} sync status")
-
-            config = pir.PirClientConfig(
-                pir_protocol=pir.PirProtocol.Value(protocol),
-                input_path=config['input_path'],
-                key_columns=key_columns,
-                output_path=config['output_path'],
-            )
-            report = pir.pir_client(self.link, config)
-
-        return {
-            'party': party,
-            'data_count': report.data_count,
-        }
-
-    def pir_memory_query(
-        self,
-        server: str,
-        config: Dict,
-        protocol="KEYWORD_PIR_LABELED_PSI",
-    ):
-        """Private information retrival online query phase.
-        Args:
-            server (str): Which party is pir server.
-            config (dict): Server/Client config dict
-                For example:
-
-                .. code:: python
-
-                    {
-                        # client config
-                        alice: {
-                            'input_path': '/path/intput.csv',
-                            'key_columns': 'id',
-                            'output_path': '/path/output.csv',
-                        },
-                        # server config
-                        bob: {
-                            'input_path': '/path/server.csv',
-                            'key_columns': 'id',
-                            'label_columns': 'label',
-                            'num_per_query': '1',
-                            'label_max_len': '20',
-                        },
-                    }
-
-                server config dict must have:
-                    'input_path', 'key_columns', 'label_columns', 'oprf_key_path',
-                    'num_per_query', 'label_max_len'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    label_columns (str, List[str]): Column(s) used as pir label
-                    num_per_query (int): Items number per query.
-                    label_max_len (int): Max number bytes of label, padding data to label_max_len
-                        Max label bytes length add 4 bytes(len).
-                client config dict must have:
-                    'input_path','key_columns', 'output_path'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    output_path (str): Query result save to output_path, csv format.
-        Returns:
-            Dict: PIR report output by SPU.
-        """
-
-        pir_client_config_names = [
-            'input_path',
-            'key_columns',
-            'output_path',
-        ]
-        pir_setup_config_names = [
-            'input_path',
-            'key_columns',
-            'label_columns',
-            'num_per_query',
-            'label_max_len',
-        ]
-
-        party = self.cluster_def['nodes'][self.rank]['party']
-        server_rank = -1
-        for i, node in enumerate(self.cluster_def['nodes']):
-            if node['party'] == server:
-                server_rank = i
-                break
-        assert server_rank >= 0, f'invalid server: {server}'
-
-        if self.rank == server_rank:
-            # check config dict
-            for name, value in config.items():
-                assert (
-                    isinstance(name, str) and name
-                ), f'Link desc param name shall be a valid string but got {type(name)}.'
-                if name not in pir_setup_config_names:
-                    raise InvalidArgumentError(
-                        f'Unsupported param {name} in pir server config desc, '
-                        f'{pir_setup_config_names} are now available only.'
-                    )
-
-            for name in pir_setup_config_names:
-                if name not in config.keys():
-                    raise InvalidArgumentError(
-                        f'param {name} must in pir server config'
-                    )
-
-            packed_bytes = struct.pack('?is', True, 1, b'\x00')
-            self.link.send(self.link.next_rank(), packed_bytes)
-            logging.info(f"rank:{self.rank} send {len(packed_bytes)} sync status")
-
-            config = pir.PirSetupConfig(
-                pir_protocol=pir.PirProtocol.Value(protocol),
-                store_type=pir.KvStoreType.Value("LEVELDB_KV_STORE"),
-                input_path=config['input_path'],
-                key_columns=config['key_columns'],
-                label_columns=config['label_columns'],
-                num_per_query=config['num_per_query'],
-                label_max_len=config['label_max_len'],
-                oprf_key_path='',
-                setup_path='::memory',
-            )
-            report = pir.pir_memory_server(self.link, config)
-
-        else:
-            # check config dict
-            for name, value in config.items():
-                assert (
-                    isinstance(name, str) and name
-                ), f'Link desc param name shall be a valid string but got {type(name)}.'
-                if name not in pir_client_config_names:
-                    raise InvalidArgumentError(
-                        f'Unsupported param {name} in pir client config desc, '
-                        f'{pir_client_config_names} are now available only.'
-                    )
-
-            for name in pir_client_config_names:
-                if name not in config.keys():
-                    raise InvalidArgumentError(
-                        f'param {name} must in pir client config'
-                    )
-
-            if isinstance(config['key_columns'], str):
-                key_columns = [config['key_columns']]
-            elif isinstance(config['key_columns'], List):
-                key_columns = config['key_columns']
-
-            recv_bytes = self.link.recv(self.link.next_rank())
-            logging.info(f"rank:{self.rank} recv {len(recv_bytes)} sync status")
-
-            config = pir.PirClientConfig(
-                pir_protocol=pir.PirProtocol.Value(protocol),
-                input_path=config['input_path'],
-                key_columns=key_columns,
-                output_path=config['output_path'],
-            )
-            report = pir.pir_client(self.link, config)
-
-        return {
-            'party': party,
-            'data_count': report.data_count,
+            'party': self.party,
+            'original_count': report.original_count,
+            'intersection_count': report.intersection_count,
         }
 
 
@@ -1535,37 +1359,47 @@ def _generate_output_uuid():
     return f'output-{uuid.uuid4()}'
 
 
-def _spu_compile(fn, *meta_args, **meta_kwargs):
+_spu_compile_lock = Lock()
+
+
+def _spu_compile(fn, copts, fn_name, *meta_args, **meta_kwargs):
     meta_args, meta_kwargs = jax.tree_util.tree_map(
-        lambda x: ray.get(x) if isinstance(x, ray.ObjectRef) else x,
+        lambda x: get_obj_ref(x),
         (meta_args, meta_kwargs),
     )
 
-    # prepare inputs and metatdata.
+    # prepare inputs and metadata.
     input_name = []
     input_vis = []
 
-    def _get_input_metatdata(obj: SPUObject):
+    def _get_input_metadata(obj: SPUObject):
         input_name.append(_generate_input_uuid())
         input_vis.append(obj.vtype)
 
-    jax.tree_util.tree_map(_get_input_metatdata, (meta_args, meta_kwargs))
+    jax.tree_util.tree_map(_get_input_metadata, (meta_args, meta_kwargs))
 
     try:
-        executable, output_tree = spu_fe.compile(
-            spu_fe.Kind.JAX,
-            fn,
-            meta_args,
-            meta_kwargs,
-            input_name,
-            input_vis,
-            lambda output_flat: [
-                _generate_output_uuid() for _ in range(len(output_flat))
-            ],
-        )
-    except Exception:
-        raise ray.exceptions.WorkerCrashedError()
+        global _spu_compile_lock
+        # The current version of cachetools used by spu compile is not thread-safe
+        with _spu_compile_lock:
+            executable, output_tree = spu_fe.compile(
+                spu_fe.Kind.JAX,
+                fn,
+                meta_args,
+                meta_kwargs,
+                input_name,
+                input_vis,
+                lambda output_flat: [
+                    _generate_output_uuid() for _ in range(len(output_flat))
+                ],
+                static_argnums=(),
+                static_argnames=None,
+                copts=copts,
+            )
+    except Exception as e:
+        raise InternalError.worker_crashed_error(f"{e}")
 
+    executable.name = fn_name
     return executable, output_tree
 
 
@@ -1716,14 +1550,14 @@ class SPU(Device):
 
         return jax.tree_util.tree_map(place, (args, kwargs))
 
-    def dump(self, obj: SPUObject, paths: List[str]):
+    def dump(self, obj: SPUObject, paths: List[Union[str, Callable]]):
         assert obj.device == self, "obj must be owned by this device."
         ret = []
         for i, actor in enumerate(self.actors.values()):
             ret.append(actor.dump.remote(obj.meta, obj.shares_name[i], paths[i]))
-        return ret
+        sfd.get(ret)
 
-    def load(self, paths: List[str]) -> SPUObject:
+    def load(self, paths: List[Union[str, Callable]]) -> SPUObject:
         outputs = [None] * self.world_size
         for i, actor in enumerate(self.actors.values()):
             actor_out = actor.load.options(num_returns=2).remote(paths[i])
@@ -1741,6 +1575,7 @@ class SPU(Device):
         static_argnames: Union[str, Iterable[str], None] = None,
         num_returns_policy: SPUCompilerNumReturnsPolicy = SPUCompilerNumReturnsPolicy.SINGLE,
         user_specified_num_returns: int = 1,
+        copts: spu_pb2.CompilerOptions = spu_pb2.CompilerOptions(),
     ):
         def wrapper(*args, **kwargs):
             # handle static_argnames of func
@@ -1756,13 +1591,19 @@ class SPU(Device):
             num_returns = user_specified_num_returns
             meta_args = list(meta_args)
 
+            def compile_fn(*args, **kwargs):
+                return _spu_compile(*args, **kwargs)
+
+            fn_name = get_fn_code_name(func)
+            compile_fn.__name__ = f"spu_compile({fn_name})"
+
             # it's ok to choose any party to compile,
             # here we choose party 0.
             executable, out_shape = (
-                sfd.remote(_spu_compile)
+                sfd.remote(compile_fn)
                 .party(self.cluster_def['nodes'][0]['party'])
                 .options(num_returns=2)
-                .remote(fn, *meta_args, **meta_kwargs)
+                .remote(fn, copts, fn_name, *meta_args, **meta_kwargs)
             )
 
             if num_returns_policy == SPUCompilerNumReturnsPolicy.FROM_COMPILER:
@@ -1817,9 +1658,9 @@ class SPU(Device):
 
     def infeed_shares(
         self,
-        io_info: Union[ray.ObjectRef, fed.FedObject],
-        shares_chunk: List[Union[ray.ObjectRef, fed.FedObject]],
-    ) -> List[Union[ray.ObjectRef, fed.FedObject]]:
+        io_info: FED_OBJECT_TYPES,
+        shares_chunk: List[FED_OBJECT_TYPES],
+    ) -> List[FED_OBJECT_TYPES]:
         assert (
             len(shares_chunk) % len(self.actors) == 0
         ), f"{len(shares_chunk)} , {len(self.actors)}"
@@ -1836,11 +1677,8 @@ class SPU(Device):
         return ret
 
     def outfeed_shares(
-        self, shares_name: List[Union[ray.ObjectRef, fed.FedObject]]
-    ) -> Tuple[
-        Union[ray.ObjectRef, fed.FedObject],
-        List[Union[ray.ObjectRef, fed.FedObject]],
-    ]:
+        self, shares_name: List[FED_OBJECT_TYPES]
+    ) -> Tuple[FED_OBJECT_TYPES, List[FED_OBJECT_TYPES]]:
         assert len(shares_name) == len(self.actors)
 
         shares_chunk_count = sfd.get(
@@ -2088,152 +1926,138 @@ class SPU(Device):
             callbacks_interval_ms,
         )
 
-    def pir_setup(
+    def psi(
         self,
-        server: str,
-        input_path: Union[str, Dict[Device, str]],
-        key_columns: Union[str, List[str]],
-        label_columns: Union[str, List[str]],
-        oprf_key_path: str,
-        setup_path: str,
-        num_per_query: int,
-        label_max_len: int,
-        protocol="KEYWORD_PIR_LABELED_PSI",
+        keys: Dict[str, List[str]],
+        input_path: Dict[str, str],
+        output_path: Dict[str, str],
+        receiver: str,
+        table_keys_duplicated: Dict[str, bool],
+        output_csv_na_rep: str = "NULL",
+        broadcast_result: bool = True,
+        protocol: str = 'PROTOCOL_KKRT',
+        ecdh_curve: str = 'CURVE_FOURQ',
+        advanced_join_type: str = "ADVANCED_JOIN_TYPE_INNER_JOIN",
+        left_side: str = "ROLE_RECEIVER",
+        disable_alignment: bool = False,
+        check_hash_digest: bool = False,
     ):
-        """Private information retrival offline setup.
+        """Private set intersection V2 API.
+        Please check https://www.secretflow.org.cn/docs/psi/latest/en-US/reference/psi_v2_config for details.
+
         Args:
-            server (str): Which party is pir server.
-            input_path (str): Server's CSV file path. comma separated and contains header.
-                Use an absolute path.
-            key_columns (str, List[str]): Column(s) used as pir key
-            label_columns (str, List[str]): Column(s) used as pir label
-            oprf_key_path (str): Ecc oprf secret key path, 32B binary format.
-                Use an absolute path.
-            setup_path (str): Offline/Setup phase output data dir. Use an absolute path.
-            num_per_query (int): Items number per query.
-            label_max_len (int): Max number bytes of label, padding data to label_max_len
-                Max label bytes length add 4 bytes(len).
+            keys (Dict[str, List[str]]): Keys for intersection from both parties.
+            input_path (Dict[str, str]): Input paths from both parties.
+            output_path (Dict[str, str]): Output paths from both parties.
+            receiver (str): Name of receiver party.
+            table_keys_duplicated (str): Whether keys columns catain duplicated rows.
+            output_csv_na_rep (str): null repsentation in output csv.
+            broadcast_result (bool, optional): Whether to reveal result to sender. Defaults to True.
+            protocol (str, optional): PSI protocol. Defaults to 'PROTOCOL_KKRT'. Allowed values: 'PROTOCOL_ECDH', 'PROTOCOL_KKRT', 'PROTOCOL_RR22'
+            ecdh_curve (str, optional): Curve for ECDH protocol. Only valid if ECDH is selected. Defaults to 'CURVE_FOURQ'. Allowed values: 'CURVE_25519', 'CURVE_FOURQ', 'CURVE_SM2', 'CURVE_SECP256K1'
+            advanced_join_type (str, optional): Advanced Join allow duplicate keys. Defaults to "ADVANCED_JOIN_TYPE_UNSPECIFIED". Allowed values: 'ADVANCED_JOIN_TYPE_UNSPECIFIED', 'ADVANCED_JOIN_TYPE_INNER_JOIN', 'ADVANCED_JOIN_TYPE_LEFT_JOIN', 'ADVANCED_JOIN_TYPE_RIGHT_JOIN', 'ADVANCED_JOIN_TYPE_FULL_JOIN', 'ADVANCED_JOIN_TYPE_DIFFERENCE'
+            left_side (str, optional): Required if advanced_join_type is selected. Defaults to "ROLE_RECEIVER". Allowed values: 'ROLE_RECEIVER', 'ROLE_SENDER'
+            skip_duplicates_check (bool, optional): If true, the check of duplicated items will be skiped. Defaults to False.
+            disable_alignment (bool, optional): If true, output is not promised to be aligned. Defaults to False.
+            check_hash_digest (bool, optional): Check if hash digest of keys from parties are equal to determine whether to early-stop. Defaults to False.
+
         Returns:
-            Dict: PIR report output by SPU.
+            Dict: PSI report.
         """
+
+        assert protocol in [
+            'PROTOCOL_ECDH',
+            'PROTOCOL_KKRT',
+            'PROTOCOL_RR22',
+        ], f"invalid protocol: {protocol}"
+
+        if protocol == 'PROTOCOL_ECDH':
+            assert ecdh_curve in [
+                'CURVE_25519',
+                'CURVE_FOURQ',
+                'CURVE_SM2',
+                'CURVE_SECP256K1',
+            ]
+        assert advanced_join_type in [
+            'ADVANCED_JOIN_TYPE_UNSPECIFIED',
+            'ADVANCED_JOIN_TYPE_INNER_JOIN',
+            'ADVANCED_JOIN_TYPE_LEFT_JOIN',
+            'ADVANCED_JOIN_TYPE_RIGHT_JOIN',
+            'ADVANCED_JOIN_TYPE_FULL_JOIN',
+            'ADVANCED_JOIN_TYPE_DIFFERENCE',
+        ]
+        assert left_side in ['ROLE_RECEIVER', 'ROLE_SENDER']
+
         return dispatch(
-            'pir_setup',
+            'psi',
             self,
-            server,
+            keys,
             input_path,
-            key_columns,
-            label_columns,
-            oprf_key_path,
-            setup_path,
-            num_per_query,
-            label_max_len,
+            output_path,
+            receiver,
+            table_keys_duplicated,
+            output_csv_na_rep,
+            broadcast_result,
             protocol,
+            ecdh_curve,
+            advanced_join_type,
+            left_side,
+            True,  # skip_duplicates_check
+            disable_alignment,
+            check_hash_digest,
         )
 
-    def pir_query(
+    def ub_psi(
         self,
-        server: str,
-        config: Dict,
-        protocol="KEYWORD_PIR_LABELED_PSI",
+        mode: str,
+        role: Dict[str, str],
+        cache_path: Dict[str, str],
+        input_path: Dict[str, str] = {},
+        server_secret_key_path: str = '',
+        keys: Dict[str, List[str]] = None,
+        server_get_result: bool = False,
+        client_get_result: bool = False,
+        disable_alignment: bool = False,
+        output_path: Dict[str, str] = {},
+        join_type: str = "ADVANCED_JOIN_TYPE_INNER_JOIN",
+        left_side: str = "ROLE_SERVER",
+        null_rep: str = "NULL",
     ):
-        """Private information retrival online query.
-        Args:
-            server (str): Which party is pir server.
-            config (dict): Server/Client config dict
-                For example
-
-                .. code:: python
-
-                    {
-                        # client config
-                        alice: {
-                            'input_path': '/path/intput.csv',
-                            'key_columns': 'id',
-                            'output_path': '/path/output.csv',
-                        },
-                        # server config
-                        bob: {
-                            'oprf_key_path': '/path/oprf_key.bin',
-                            'setup_path': '/path/setup_dir',
-                        },
-                    }
-
-                server config dict must have:
-                    'oprf_key_path','setup_path'
-                    oprf_key_path (str): Ecc oprf secret key path, 32B binary format.
-                        Use an absolute path.
-                    setup_path (str): Offline/Setup phase output data dir. Use an absolute path.
-                client config dict must have:
-                    'input_path','key_columns', 'output_path'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    output_path (str): Query result save to output_path, csv format.
-        Returns:
-            Dict: PIR report output by SPU.
-        """
+        assert mode in [
+            'MODE_OFFLINE_GEN_CACHE',
+            'MODE_OFFLINE_TRANSFER_CACHE',
+            'MODE_OFFLINE',
+            'MODE_ONLINE',
+            'MODE_FULL',
+        ]
+        assert join_type in [
+            'ADVANCED_JOIN_TYPE_INNER_JOIN',
+            'ADVANCED_JOIN_TYPE_LEFT_JOIN',
+            'ADVANCED_JOIN_TYPE_RIGHT_JOIN',
+            'ADVANCED_JOIN_TYPE_FULL_JOIN',
+            'ADVANCED_JOIN_TYPE_DIFFERENCE',
+        ]
+        roles = set()
+        for r in role.values():
+            roles.add(r)
+        assert roles == {
+            'ROLE_SERVER',
+            'ROLE_CLIENT',
+        }, 'role must be ROLE_SERVER or ROLE_CLIENT'
         return dispatch(
-            'pir_query',
+            'ub_psi',
             self,
-            server,
-            config,
-            protocol,
-        )
-
-    def pir_memory_query(
-        self,
-        server: str,
-        config: Dict,
-        protocol="KEYWORD_PIR_LABELED_PSI",
-    ):
-        """Private information retrival online query.
-        Args:
-            server (str): Which party is pir server.
-            config (dict): Server/Client config dict
-                For example
-
-                .. code:: python
-
-                    {
-                        # client config
-                        alice: {
-                            'input_path': '/path/intput.csv',
-                            'key_columns': 'id',
-                            'output_path': '/path/output.csv',
-                        },
-                        # server config
-                        bob: {
-                            'input_path': '/path/server.csv',
-                            'key_columns': 'id',
-                            'label_columns': 'label',
-                            'num_per_query': '1',
-                            'label_max_len': '20',
-                        },
-                    }
-
-                server config dict must have:
-                    'input_path', 'key_columns', 'label_columns', 'oprf_key_path',
-                    'num_per_query', 'label_max_len'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    label_columns (str, List[str]): Column(s) used as pir label
-                    num_per_query (int): Items number per query.
-                    label_max_len (int): Max number bytes of label, padding data to label_max_len
-                        Max label bytes length add 4 bytes(len).
-                client config dict must have:
-                    'input_path','key_columns', 'output_path'
-                    input_path (str): Client's CSV file path. comma separated and contains header.
-                        Use an absolute path.
-                    key_columns (str, List[str]): Column(s) used as pir key
-                    output_path (str): Query result save to output_path, csv format.
-        Returns:
-            Dict: PIR report output by SPU.
-        """
-        return dispatch(
-            'pir_memory_query',
-            self,
-            server,
-            config,
-            protocol,
+            mode=mode,
+            role=role,
+            input_path=input_path,
+            output_path=output_path,
+            keys=keys,
+            server_secret_key_path=server_secret_key_path,
+            cache_path=cache_path,
+            server_get_result=server_get_result,
+            client_get_result=client_get_result,
+            disable_alignment=disable_alignment,
+            join_type=join_type,
+            left_side=left_side,
+            null_rep=null_rep,
         )

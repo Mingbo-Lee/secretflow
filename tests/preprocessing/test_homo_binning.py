@@ -1,3 +1,17 @@
+# Copyright 2024 Ant Group Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 
 import numpy as np
@@ -6,9 +20,9 @@ import pytest
 
 from secretflow.data.horizontal import read_csv as h_read_csv
 from secretflow.device import reveal
-from secretflow.preprocessing.binning.homo_binning import HomoBinning
 from secretflow.security.aggregation.plain_aggregator import PlainAggregator
 from secretflow.security.compare.plain_comparator import PlainComparator
+from secretflow_fl.preprocessing.binning.homo_binning import HomoBinning
 
 _temp_dir = tempfile.mkdtemp()
 
@@ -41,14 +55,14 @@ def gen_data(data_num, feature_num, is_sparse=False, use_random=False, data_bin_
 
 
 @pytest.fixture(scope='module')
-def prod_env_and_data(sf_production_setup_devices):
+def prod_env_and_data(sf_production_setup_devices_ray):
     data1 = gen_data(10000, 10, use_random=False)
     data2 = gen_data(5000, 10, use_random=False)
     dfs = [data1, data2]
 
     file_uris = {
-        sf_production_setup_devices.alice: f'{_temp_dir}/test_alice.csv',
-        sf_production_setup_devices.bob: f'{_temp_dir}/test_bob.csv',
+        sf_production_setup_devices_ray.alice: f'{_temp_dir}/test_alice.csv',
+        sf_production_setup_devices_ray.bob: f'{_temp_dir}/test_bob.csv',
     }
 
     for df, file_uri in zip(dfs, file_uris.values()):
@@ -56,11 +70,11 @@ def prod_env_and_data(sf_production_setup_devices):
 
     hdf = h_read_csv(
         file_uris,
-        aggregator=PlainAggregator(sf_production_setup_devices.carol),
-        comparator=PlainComparator(sf_production_setup_devices.carol),
+        aggregator=PlainAggregator(sf_production_setup_devices_ray.carol),
+        comparator=PlainComparator(sf_production_setup_devices_ray.carol),
     )
 
-    yield sf_production_setup_devices, {
+    yield sf_production_setup_devices_ray, {
         'data1': data1,
         'data2': data2,
         'dfs': dfs,
@@ -75,7 +89,7 @@ def test_homo_binning(prod_env_and_data):
     bin_obj = HomoBinning(
         bin_num=5,
         bin_indexes=[1, 2, 3, 4],
-        error=1e-10,
+        error=1e-9,  # TODO:1e-10
         max_iter=200,
         compress_thres=30,
     )

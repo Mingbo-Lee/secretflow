@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from heu import phe
 
-from secretflow.data.vertical import VDataFrame
+from secretflow.component.core import CompVDataFrame
 from secretflow.device import HEU, PYU, SPU, PYUObject
 from secretflow.device.device.heu import HEUMoveConfig
 from secretflow.preprocessing.binning.vert_woe_binning_pyu import (
@@ -46,7 +46,7 @@ class VertWoeBinning:
     def __init__(self, secure_device: Union[SPU, HEU]):
         self.secure_device = secure_device
 
-    def _find_label_holder_device(self, vdata: VDataFrame, label_name) -> PYU:
+    def _find_label_holder_device(self, vdata: CompVDataFrame, label_name) -> PYU:
         """
         Find which holds the label column.
 
@@ -57,7 +57,8 @@ class VertWoeBinning:
         Return:
             PYU device
         """
-        device_column_names = vdata.partition_columns
+
+        device_column_names = {pyu: p.columns for pyu, p in vdata.partitions.items()}
         label_count = 0
         for device in device_column_names:
             if np.isin(label_name, device_column_names[device]).all():
@@ -66,13 +67,13 @@ class VertWoeBinning:
 
         assert (
             label_count == 1
-        ), f"One and only one party can have label, but found {label_count}"
+        ), f"One and only one party can have label, but found {label_count}, label name {label_name}, vdata {vdata.columns}."
 
         return label_holder_device
 
     def binning(
         self,
-        vdata: VDataFrame,
+        vdata: CompVDataFrame,
         binning_method: str = "quantile",
         bin_num: int = 10,
         bin_names: Dict[PYU, List[str]] = {},
@@ -95,7 +96,7 @@ class VertWoeBinning:
                 for string type feature bin by it's categories.
                 else bin is count for np.nan samples
             binning_method: how to bin number type features.
-                Options: "quantile"(equal frequency)/"chimerge"(ChiMerge from AAAI92-019)
+                Options: "quantile"(equal frequency)/"chimerge"(ChiMerge from AAAI92-019)/"eq_range"(equal range)
                 Default: "quantile"
             bin_num: max bin counts for one features.
                 Range: (0, ∞]
@@ -133,6 +134,10 @@ class VertWoeBinning:
                             "else_counts": int, # np.nan samples count
                             "filling_values": list[float], # woe values for each bins.
                             "else_filling_value": float, # woe value for np.nan samples.
+                            "positive_rates": list[float], # positive samples rate in each bins.
+                            "else_positive_rate": float, # positive samples rate for np.nan samples.
+                            "total_rates": list[float], # total samples rate in each bins.
+                            "else_total_rate": float, # total samples rate for np.nan samples.
                         },
                         # ... others feature
                     ],
@@ -157,7 +162,8 @@ class VertWoeBinning:
         assert binning_method in (
             "quantile",
             "chimerge",
-        ), f"binning_method only support ('quantile', 'chimerge'), got {binning_method}"
+            "eq_range",
+        ), f"binning_method only support ('quantile', 'chimerge', 'eq_range'), got {binning_method}"
         assert bin_num > 0, f"bin_num range (0, ∞], got {bin_num}"
         assert (
             chimerge_init_bins > 2
@@ -176,7 +182,6 @@ class VertWoeBinning:
         label_holder_audit_log_path = None
 
         if isinstance(self.secure_device, HEU):
-            assert len(bin_names) == 2, "only support two party binning in HEU mode"
             assert self.secure_device.sk_keeper_name() == label_holder_device.party, (
                 f"HEU sk keeper party {self.secure_device.sk_keeper_name()} "
                 "mismatch with label_holder device's party {label_holder_device.party}"
@@ -196,7 +201,7 @@ class VertWoeBinning:
                 device in vdata.partitions.keys()
             ), f"device {device} in bin_names not exist in vdata"
             workers[device] = VertWoeBinningPyuWorker(
-                vdata.partitions[device].data.data,
+                vdata.partitions[device].data,
                 binning_method,
                 bin_num,
                 bin_names[device],
@@ -275,11 +280,19 @@ class VertWoeBinning:
                 total_counts.to(device), merged_split_point_indices.to(device)
             )
             woes, ivs = label_holder_worker.label_holder_calc_woe_for_peer(bin_stats)
+
+            pos_rates, total_rates = (
+                label_holder_worker.label_holder_calc_rates_for_peer(
+                    bin_stats, vdata.num_rows
+                )
+            )
             # label_holder process and save the ivs, calculate the feature_ivs
             label_holder_worker.label_holder_collect_iv_for_participant(
                 ivs, bim_sum_info
             )
-            report = worker.participant_build_report(woes.to(device))
+            report = worker.participant_build_report(
+                woes.to(device), pos_rates.to(device), total_rates.to(device)
+            )
             bin_rules[device] = report
 
         # feature ivs are in label_holder report, which may be later shared to worker

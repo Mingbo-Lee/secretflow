@@ -42,7 +42,8 @@ class Shuffler(Component):
         print_params(self.params)
 
     def set_params(self, params: dict):
-        self.params.seed = params.get('seed', default_params.seed)
+        if 'seed' in params:
+            self.params.seed = params['seed']
 
     def get_params(self, params: dict):
         params['seed'] = self.params.seed
@@ -110,9 +111,11 @@ class Shuffler(Component):
                 'WorkerShuffler',
                 'undo_shuffle_mask_with_keys',
                 split_buckets,
-                keys.to(worker_shuffler.device)
-                if isinstance(keys, PYUObject)
-                else [k.to(worker_shuffler.device) for k in keys],
+                (
+                    keys.to(worker_shuffler.device)
+                    if isinstance(keys, PYUObject)
+                    else [k.to(worker_shuffler.device) for k in keys]
+                ),
             )
             for worker_shuffler, split_buckets in zip(
                 self.worker_shufflers, split_buckets_parition_wise

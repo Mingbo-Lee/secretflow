@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Tuple, Union, List
+from typing import List, Tuple, Union
 
 import numpy as np
 
@@ -22,7 +22,13 @@ from secretflow.ml.boost.sgb_v.core.params import default_params
 from secretflow.ml.boost.sgb_v.factory.sgb_actor import SGBActor
 
 from ....core.params import RegType
-from ..component import Component, Devices, print_params
+from ..component import (
+    Component,
+    Devices,
+    print_params,
+    set_dict_from_params,
+    set_params_from_dict,
+)
 from ..logging import LoggingParams, LoggingTools
 from .loss_computer_actor import LossComputerActor
 
@@ -32,7 +38,7 @@ class LossComputerParams:
     """
     'objective': Specify the learning objective.
         default: 'logistic'
-        range: ['linear', 'logistic']
+        range: ['linear', 'logistic', 'tweedie']
     'enable_quantization': Whether enable quantization of g and h.
         only recommended for encryption schemes with small plaintext range, like elgamal.
         default: False
@@ -40,23 +46,19 @@ class LossComputerParams:
     'quantization_scale': only effective if quanization enabled. Scale the sum of g to the specified value.
         default: 10000.0
         range: [0, 10000000.0]
-    'early_stop_criterion_g_abs_sum': if sum(abs(g)) is lower than or equal to this threadshold, training will stop.
-        default: 0.0
-        range [0.0, inf)
-    'early_stop_criterion_g_abs_sum_change_ratio': if absolute g sum change ratio is lower than or equal to this threadshold, training will stop.
-        default: 0.0
-        range [0, 1]
+    'tweedie_variance_power': only effective if objective is tweedie.
+        Parameter that controls the variance of the Tweedie distribution.
+        var(y) ~ E(y)^tweedie_variance_power
+        default: 1.5
+        range: (1, 2)
+        Set closer to 2 to shift towards a gamma distribution.
+        Set closer to 1 to shift towards a Poisson distribution.
     """
 
     objective: RegType = default_params.objective
     enable_quantization: bool = default_params.enable_quantization
     quantization_scale: float = default_params.quantization_scale
-    early_stop_criterion_g_abs_sum: float = (
-        default_params.early_stop_criterion_g_abs_sum
-    )
-    early_stop_criterion_g_abs_sum_change_ratio: float = (
-        default_params.early_stop_criterion_g_abs_sum_change_ratio
-    )
+    tweedie_variance_power: float = default_params.tweedie_variance_power
 
 
 class LossComputer(Component):
@@ -74,45 +76,20 @@ class LossComputer(Component):
         print_params(self.logging_params)
 
     def set_params(self, params: dict):
-        obj = params.get('objective', 'logistic')
-        obj = RegType(obj)
+        if 'objective' in params:
+            obj = RegType(params['objective'])
+            self.params.objective = obj
 
-        self.params.enable_quantization = params.get(
-            'enable_quantization', default_params.enable_quantization
-        )
-        quantization_scale = params.get(
-            'quantization_scale', default_params.quantization_scale
-        )
-
-        early_stop_criterion_g_abs_sum = params.get(
-            'early_stop_criterion_g_abs_sum',
-            default_params.early_stop_criterion_g_abs_sum,
-        )
-
-        early_stop_criterion_g_abs_sum_change_ratio = params.get(
-            'early_stop_criterion_g_abs_sum_change_ratio',
-            default_params.early_stop_criterion_g_abs_sum_change_ratio,
-        )
-
-        self.params.quantization_scale = quantization_scale
-        self.params.early_stop_criterion_g_abs_sum = early_stop_criterion_g_abs_sum
-        self.params.early_stop_criterion_g_abs_sum_change_ratio = (
-            early_stop_criterion_g_abs_sum_change_ratio
-        )
-        self.params.objective = obj
-
-        self.logging_params = LoggingTools.logging_params_from_dict(params)
+        keywords = [
+            'enable_quantization',
+            'quantization_scale',
+            'tweedie_variance_power',
+        ]
+        set_params_from_dict(self.params, params, keywords)
+        LoggingTools.logging_params_from_dict(params, self.logging_params)
 
     def get_params(self, params: dict):
-        params['objective'] = self.params.objective
-        params['enable_quantization'] = self.params.enable_quantization
-        params['quantization_scale'] = self.params.quantization_scale
-        params[
-            'early_stop_criterion_g_abs_sum'
-        ] = self.params.early_stop_criterion_g_abs_sum
-        params[
-            'early_stop_criterion_g_abs_sum_change_ratio'
-        ] = self.params.early_stop_criterion_g_abs_sum_change_ratio
+        set_dict_from_params(self.params, params)
         LoggingTools.logging_params_write_dict(params, self.logging_params)
 
     def set_devices(self, devices: Devices):
@@ -136,7 +113,12 @@ class LossComputer(Component):
     ) -> Tuple[PYUObject, PYUObject]:
         obj = self.params.objective
         return self.actor.invoke_class_method_two_ret(
-            'LossComputerActor', 'compute_gh', y, pred, obj
+            'LossComputerActor',
+            'compute_gh',
+            y,
+            pred,
+            obj,
+            self.params.tweedie_variance_power,
         )
 
     def compute_abs_sums(self, g: PYUObject, h: PYUObject):
@@ -148,18 +130,6 @@ class LossComputer(Component):
         scaling = self.params.quantization_scale
         return self.actor.invoke_class_method(
             'LossComputerActor', 'compute_scales', scaling
-        )
-
-    def check_early_stop(self) -> PYUObject:
-        abs_sum_threshold = self.params.early_stop_criterion_g_abs_sum
-        abs_sum_change_ratio_threshold = (
-            self.params.early_stop_criterion_g_abs_sum_change_ratio
-        )
-        return self.actor.invoke_class_method(
-            'LossComputerActor',
-            'check_early_stop',
-            abs_sum_threshold,
-            abs_sum_change_ratio_threshold,
         )
 
     def scale_gh(self, g: PYUObject, h: PYUObject) -> Tuple[PYUObject, PYUObject]:

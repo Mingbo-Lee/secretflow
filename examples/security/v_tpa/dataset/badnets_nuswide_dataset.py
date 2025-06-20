@@ -1,9 +1,25 @@
 #!/usr/bin/env python
 # coding=utf-8
-from .split_dataset import PassiveDataset, ActiveDataset
-from .mirror_nuswide_dataset import MirrorNUSWIDEDataset
-import torch
+# Copyright 2024 Ant Group Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import pdb
+
+import torch
+
+from .mirror_nuswide_dataset import MirrorNUSWIDEDataset
+from .split_dataset import ActiveDataset, PassiveDataset
 
 
 class BadNetsNUSWIDEDataset(MirrorNUSWIDEDataset):
@@ -36,7 +52,7 @@ class BadNetsNUSWIDEDataset(MirrorNUSWIDEDataset):
 
     def _split_data(self, dataset, poisoning_indexes, party_num=2, channel_first=True):
         if party_num not in self.split_points:
-            raise "Invalid number of participants!!!"
+            raise ValueError("Invalid number of participants!!!")
 
         parties = {}
         for party_index in range(party_num):

@@ -14,21 +14,23 @@ After installation, don't forget to [have a quick try](#a-quick-try) to check if
 
 ## Environment
 
-Python：3.8
+Python：3.10
 
 pip: >= 19.3
 
-OS: CentOS 7, Ubuntu 18.04
+OS: CentOS 7, Ubuntu 20.04
 
 CPU/Memory: recommended minimum requirement is 8C16G.
+
+> **_Note:_** Due to CI resource limitation, macOS x64 prebuild binary is no longer available.
 
 ## Option 1: from pypi
 For users who want to try SecretFlow, you can install [the current release](https://pypi.org/project/secretflow/).
 
-Note that it requires python version == 3.8, you can create a virtual environment with conda if not satisfied.
+Note that it requires python version == 3.10, you can create a virtual environment with conda if not satisfied.
 
 ```
-conda create -n sf python=3.8
+conda create -n sf python=3.10
 conda activate sf
 ```
 
@@ -41,22 +43,11 @@ pip install -U secretflow
 ## Option 2: from docker
 You can also use SecretFlow Docker image to give SecretFlow a quick try.
 
-The latest version can be obtained from [secretflow tags](https://hub.docker.com/r/secretflow/secretflow-anolis8/tags).
-
-```
-export version={SecretFlow version}
-```
-
-for example
 ```bash
-export version=0.6.13b1
+docker run -it secretflow/secretflow-anolis8:latest
 ```
 
-then run the image.
-```bash
-docker run -it secretflow/secretflow-anolis8:${version}
-
-```
+More versions can be obtained from [secretflow tags](https://hub.docker.com/r/secretflow/secretflow-anolis8/tags).
 
 ## Option 3: from source
 
@@ -66,11 +57,12 @@ docker run -it secretflow/secretflow-anolis8:${version}
 git clone https://github.com/secretflow/secretflow.git
 cd secretflow
 
-conda create -n secretflow python=3.8
+conda create -n secretflow python=3.10
 conda activate secretflow
 ```
 
 2. Install SecretFlow
+
 ```sh
 
 python setup.py bdist_wheel
@@ -96,7 +88,7 @@ Just follow the installation of anaconda in GNU/Linux to install anaconda in you
 - create conda environment
 
 ```shell
-conda create -n sf python=3.8
+conda create -n sf python=3.10
 ```
 
 - activate the environment

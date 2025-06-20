@@ -96,10 +96,9 @@ class LevelWiseTreeTrainer(TreeTrainer):
         LoggingTools.logging_params_write_dict(params, self.logging_params)
 
     def _set_trainer_params(self, params: dict):
-        depth = params.get('max_depth', default_params.max_depth)
-
-        self.params.max_depth = depth
-        self.logging_params = LoggingTools.logging_params_from_dict(params)
+        if 'max_depth' in params:
+            self.params.max_depth = params['max_depth']
+        LoggingTools.logging_params_from_dict(params, self.logging_params)
 
     def train_tree_context_setup(
         self,
@@ -107,7 +106,8 @@ class LevelWiseTreeTrainer(TreeTrainer):
         order_map_manager: OrderMapManager,
         y: PYUObject,
         pred: Union[PYUObject, np.ndarray],
-        x_shape: Tuple[int, int],
+        sample_num: Union[PYUObject, int],
+        sample_weight: Union[PYUObject, None],
     ):
         logging.info("train tree context set up.")
         # reset caches
@@ -125,34 +125,52 @@ class LevelWiseTreeTrainer(TreeTrainer):
             col_choices, total_buckets, feature_buckets
         )
         g, h = self.components.loss_computer.compute_gh(y, pred)
+        # weight has row num = row_choices
         row_choices, weight = self.components.sampler.generate_row_choices(
-            x_shape[0], g
+            sample_num, g
         )
+        if self.components.sampler.should_row_subsampling():
+            self.row_choices = reveal(row_choices)
+        else:
+            # Avoid transmission of None object in ic_mode
+            self.row_choices = None
+
+        # by validation, sample_weight is either None or numpy array with shape (sample_num, 1) in PYUObject
+        if sample_weight is not None:
+            if self.row_choices is not None:
+                sample_weight = self.components.sampler.apply_vector_sampling(
+                    sample_weight, self.row_choices, reshaped=False
+                )
+            weight = (
+                y.device(lambda w1, w2: np.multiply(w1, w2))(weight, sample_weight)
+                if (weight is not None)
+                else sample_weight
+            )
 
         order_map = order_map_manager.get_order_map()
         self.bucket_lists = order_map_manager.get_bucket_lists(col_choices)
         self.order_map_sub = self.components.sampler.apply_v_fed_sampling(
             order_map, row_choices, col_choices
         )
-        self.row_choices = row_choices
+
+        self.node_select_shape = (
+            1,
+            reveal(sample_num) if self.row_choices is None else self.row_choices.size,
+        )
+
         self.bucket_num = order_map_manager.buckets
         logging.debug("sub sampled (per tree).")
 
         # compute g, h and encryption
-        g = self.components.sampler.apply_vector_sampling_weighted(
+        g = self.components.sampler.apply_vector_sampling_and_weight(
             g, row_choices, weight
         )
-        h = self.components.sampler.apply_vector_sampling_weighted(
+        h = self.components.sampler.apply_vector_sampling_and_weight(
             h, row_choices, weight
         )
         self.components.loss_computer.compute_abs_sums(g, h)
         logging.debug("g h computed.")
 
-        self.should_stop = reveal(self.components.loss_computer.check_early_stop())
-        if self.should_stop:
-            logging.debug("early stopped.")
-            return
-        logging.debug("not early stopped.")
         self.components.loss_computer.compute_scales()
 
         g, h = self.components.loss_computer.scale_gh(g, h)
@@ -174,13 +192,14 @@ class LevelWiseTreeTrainer(TreeTrainer):
         order_map_manager: OrderMapManager,
         y: PYUObject,
         pred: Union[PYUObject, np.ndarray],
-        x_shape: Tuple[int, int],
+        sample_num: Union[PYUObject, int],
+        sample_weight: Union[None, PYUObject],
     ) -> DistributedTree:
-        self.train_tree_context_setup(cur_tree_num, order_map_manager, y, pred, x_shape)
-        if self.should_stop:
-            return None
+        self.train_tree_context_setup(
+            cur_tree_num, order_map_manager, y, pred, sample_num, sample_weight
+        )
         logging.info("begin train tree.")
-        row_num = self.order_map_sub.shape[0]
+        row_num = self.node_select_shape[1]
         g, h = self.g, self.h
         root_select = self.components.node_selector.root_select(row_num)
 
@@ -209,6 +228,9 @@ class LevelWiseTreeTrainer(TreeTrainer):
         weight = self.components.leaf_manager.compute_leaf_weights(g, h)
         leaf_node_indices = self.components.leaf_manager.get_leaf_indices()
         tree = DistributedTree()
+        tree.set_enable_packbits(
+            self.components.bucket_sum_calculator.params.enable_packbits
+        )
         self.components.split_tree_builder.insert_split_trees_into_distributed_tree(
             tree, leaf_node_indices
         )
@@ -226,11 +248,10 @@ class LevelWiseTreeTrainer(TreeTrainer):
     ) -> Tuple[PYUObject, PYUObject, PYUObject, PYUObject]:
         last_level = level == (self.params.max_depth - 1)
 
-        (
-            label_holder_split_buckets,
-            gain_is_cost_effective,
-        ) = self._find_best_split_bucket(
-            split_node_selects, last_level, tree_num, level
+        (label_holder_split_buckets, gains, gain_is_cost_effective) = (
+            self._find_best_split_bucket(
+                split_node_selects, last_level, tree_num, level
+            )
         )
 
         # split not in party will be marked as -1
@@ -258,12 +279,15 @@ class LevelWiseTreeTrainer(TreeTrainer):
         split_points = order_map_manager.batch_query_split_points_each_party(
             split_feature_buckets_each_party
         )
+        select_shape = self.node_select_shape
         lchild_ss = self.components.split_tree_builder.do_split_list_wise_each_party(
             split_feature_buckets_each_party,
             split_points,
             left_selects_each_party,
             gain_is_cost_effective,
+            gains,
             split_node_indices,
+            select_shape,
         )
         (
             childs_s,
@@ -294,7 +318,9 @@ class LevelWiseTreeTrainer(TreeTrainer):
             level: int. which level is training
 
         Return:
-            idx of split bucket for each node, and indicator if gain > gamma
+            idx of split bucket for each node
+            indicator if gain > gamma
+            gains at split point
         """
 
         # only compute the gradient sums of left or right children node. (choose fewer ones)
@@ -319,22 +345,30 @@ class LevelWiseTreeTrainer(TreeTrainer):
             self.bucket_lists,
             self.components.gradient_encryptor,
             node_num,
+            self.node_select_shape,
         )
         level_nodes_G, level_nodes_H = self.components.loss_computer.reverse_scale_gh(
             level_nodes_G, level_nodes_H
         )
-        (
-            split_buckets,
-            gain_is_cost_effective,
-        ) = self.components.split_finder.find_best_splits_level_wise(
-            level_nodes_G, level_nodes_H, tree_num, level
+        (split_buckets, gain_is_cost_effective, gains) = (
+            self.components.split_finder.find_best_splits_level_wise(
+                level_nodes_G, level_nodes_H, tree_num, level
+            )
         )
         # all parties including driver know the shape of tree in each node
         # hence all parties including driver will know the pruning results.
         # hence we can reveal gain_is_cost_effective
         gain_is_cost_effective = reveal(gain_is_cost_effective)
+
+        # WARNING: gains at the index of split_buckets will be revealed
+        # for calculation of feature importance.
+        # To Reduce the risk, we can:
+        # DO NOT REPEAT THE TRAINING PROCESS WITH THE SAME PARTY FOR TOO
+        # MANY TIMES TO AVOID REPLAY ATTACKS
+        gains = reveal(gains)
+
         self.components.bucket_sum_calculator.update_level_cache(
             is_last_level, gain_is_cost_effective
         )
 
-        return split_buckets, gain_is_cost_effective
+        return split_buckets, gains, gain_is_cost_effective

@@ -1,3 +1,17 @@
+# Copyright 2024 Ant Group Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from io import StringIO
 
 import numpy as np
@@ -5,11 +19,19 @@ import pandas as pd
 import pytest
 
 import secretflow.distributed as sfd
+from secretflow.component.core import (
+    CompVDataFrame,
+    VTableField,
+    VTableFieldKind,
+    VTableFieldType,
+    VTableSchema,
+)
 from secretflow.data import partition
 from secretflow.data.vertical.dataframe import VDataFrame
 from secretflow.device.driver import reveal
 from secretflow.preprocessing.binning.vert_binning import VertBinning
 from secretflow.preprocessing.binning.vert_woe_binning import VertWoeBinning
+from secretflow.utils import secure_pickle as pickle
 from secretflow.utils.simulation.datasets import dataset
 
 
@@ -30,7 +52,11 @@ def woe_almost_equal(a, b):
             if isinstance(a_f_bin[k], str) or k == "categories":
                 assert a_f_bin[k] == b_f_bin[k], k
             else:
-                np.testing.assert_almost_equal(a_f_bin[k], b_f_bin[k], err_msg=k)
+                np.testing.assert_almost_equal(
+                    a_f_bin[k],
+                    b_f_bin[k],
+                    err_msg=f"{f_name, k, a_f_bin[k], b_f_bin[k]}",
+                )
 
 
 def audit_ciphertext_equal(a, b):
@@ -48,7 +74,7 @@ def audit_ciphertext_equal(a, b):
 
 
 @pytest.fixture(scope='module')
-def prod_env_and_data(sf_production_setup_devices):
+def prod_env_and_data(sf_production_setup_devices_ray):
     normal_data = pd.read_csv(
         dataset('linear'),
         usecols=[f'x{i}' for i in range(1, 11)] + ['y'],
@@ -59,11 +85,16 @@ def prod_env_and_data(sf_production_setup_devices):
     normal_data['x2'] = np.random.randint(0, 5, (row_num,))
     v_float_data = VDataFrame(
         {
-            sf_production_setup_devices.alice: partition(
-                data=sf_production_setup_devices.alice(lambda: normal_data)()
+            sf_production_setup_devices_ray.alice: partition(
+                data=sf_production_setup_devices_ray.alice(lambda: normal_data)()
             ),
-            sf_production_setup_devices.bob: partition(
-                data=sf_production_setup_devices.bob(
+            sf_production_setup_devices_ray.bob: partition(
+                data=sf_production_setup_devices_ray.bob(
+                    lambda: normal_data.drop("y", axis=1)
+                )()
+            ),
+            sf_production_setup_devices_ray.carol: partition(
+                data=sf_production_setup_devices_ray.carol(
                     lambda: normal_data.drop("y", axis=1)
                 )()
             ),
@@ -94,22 +125,46 @@ def prod_env_and_data(sf_production_setup_devices):
 
     v_nan_data = VDataFrame(
         {
-            sf_production_setup_devices.alice: partition(
-                data=sf_production_setup_devices.alice(lambda: nan_str_data)()
+            sf_production_setup_devices_ray.alice: partition(
+                data=sf_production_setup_devices_ray.alice(lambda: nan_str_data)()
             ),
-            sf_production_setup_devices.bob: partition(
-                data=sf_production_setup_devices.bob(
+            sf_production_setup_devices_ray.bob: partition(
+                data=sf_production_setup_devices_ray.bob(
+                    lambda: nan_str_data.drop("y", axis=1)
+                )()
+            ),
+            sf_production_setup_devices_ray.carol: partition(
+                data=sf_production_setup_devices_ray.carol(
                     lambda: nan_str_data.drop("y", axis=1)
                 )()
             ),
         }
     )
 
-    yield sf_production_setup_devices, {
+    def _build_schema(df: VDataFrame, labels: set = {"y"}) -> dict[str, VTableSchema]:
+        res = {}
+        for pyu, p in df.partitions.items():
+            fields = []
+            for name, dtype in p.dtypes.items():
+                dt = VTableFieldType.from_dtype(dtype)
+                kind = (
+                    VTableFieldKind.LABEL if name in labels else VTableFieldKind.FEATURE
+                )
+                fields.append(VTableField(name, dt, kind))
+
+            res[pyu.party] = VTableSchema(fields)
+
+        return res
+
+    yield sf_production_setup_devices_ray, {
         'normal_data': normal_data,
-        'v_float_data': v_float_data,
+        'v_float_data': CompVDataFrame.from_pandas(
+            v_float_data, schemas=_build_schema(v_float_data)
+        ),
         'nan_str_data': nan_str_data,
-        'v_nan_data': v_nan_data,
+        'v_nan_data': CompVDataFrame.from_pandas(
+            v_nan_data, schemas=_build_schema(v_nan_data)
+        ),
     }
 
 
@@ -194,8 +249,6 @@ def test_binning_nan(prod_env_and_data):
     woe_almost_equal(he_bob, he_alice)
 
     # audit_log
-    import cloudpickle as pickle
-
     with open('alice.audit', 'rb') as f:
         a = pickle.load(f)
     with open('bob.audit', 'rb') as f:
@@ -220,19 +273,31 @@ def test_binning_normal(prod_env_and_data):
 
     he_report = he_binning.binning(
         data['v_float_data'],
-        bin_names={env.alice: ["x1", "x2", "x3"], env.bob: ["x1", "x2", "x3"]},
+        bin_names={
+            env.alice: ["x1", "x2", "x3"],
+            env.bob: ["x1", "x2", "x3"],
+            env.carol: ["x1", "x2", "x3"],
+        },
         label_name="y",
     )
     ss_report = ss_binning.binning(
         data['v_float_data'],
-        bin_names={env.alice: ["x1", "x2", "x3"], env.bob: ["x1", "x2", "x3"]},
+        bin_names={
+            env.alice: ["x1", "x2", "x3"],
+            env.bob: ["x1", "x2", "x3"],
+            env.carol: ["x1", "x2", "x3"],
+        },
         label_name="y",
     )
 
     vert_binning_report = vert_binning.binning(
         data['v_nan_data'],
         binning_method="eq_range",
-        bin_names={env.alice: ["f1", "f3", "f2"], env.bob: ["f1", "f3", "f2"]},
+        bin_names={
+            env.alice: ["f1", "f3", "f2"],
+            env.bob: ["f1", "f3", "f2"],
+            env.carol: ["f1", "f3", "f2"],
+        },
     )
     assert he_report.keys() == vert_binning_report.keys()
 
@@ -242,15 +307,13 @@ def test_binning_normal(prod_env_and_data):
     he_alice = reveal(he_report[env.alice])
     ss_bob = reveal(ss_report[env.bob])
     he_bob = reveal(he_report[env.bob])
-    print("ss_alice to ss_alice")
-    print(ss_alice)
+    ss_carol = reveal(ss_report[env.carol])
+    he_carol = reveal(he_report[env.carol])
     woe_almost_equal(ss_alice, he_alice)
-    print("ss_bob to ss_alice")
-    print(ss_bob)
     woe_almost_equal(ss_bob, he_alice)
-    print("ss_bob to ss_alice")
-    print(he_bob)
+    woe_almost_equal(ss_carol, he_carol)
     woe_almost_equal(he_bob, he_alice)
+    woe_almost_equal(he_carol, he_alice)
 
 
 def test_binning_normal_chimerge(prod_env_and_data):
@@ -282,4 +345,30 @@ def test_binning_normal_chimerge(prod_env_and_data):
     woe_almost_equal(ss_bob, he_alice)
     print("chi_bob to chi_alice")
     print(he_bob)
+    woe_almost_equal(he_bob, he_alice)
+
+
+def test_binning_normal_eq_range(prod_env_and_data):
+    env, data = prod_env_and_data
+    he_binning = VertWoeBinning(env.heu)
+    ss_binning = VertWoeBinning(env.spu)
+    he_report = he_binning.binning(
+        data['v_float_data'],
+        binning_method="eq_range",
+        bin_names={env.alice: ["x1", "x2", "x3"], env.bob: ["x1", "x2", "x3"]},
+        label_name="y",
+    )
+    ss_report = ss_binning.binning(
+        data['v_float_data'],
+        binning_method="eq_range",
+        bin_names={env.alice: ["x1", "x2", "x3"], env.bob: ["x1", "x2", "x3"]},
+        label_name="y",
+    )
+    assert he_report.keys() == ss_report.keys()
+    ss_alice = reveal(ss_report[env.alice])
+    he_alice = reveal(he_report[env.alice])
+    ss_bob = reveal(ss_report[env.bob])
+    he_bob = reveal(he_report[env.bob])
+    woe_almost_equal(ss_alice, he_alice)
+    woe_almost_equal(ss_bob, he_alice)
     woe_almost_equal(he_bob, he_alice)

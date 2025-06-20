@@ -18,6 +18,7 @@ from dataclasses import dataclass, fields
 from typing import List
 
 from secretflow.device import HEU, PYU
+
 from ..sgb_actor import SGBActor
 
 
@@ -26,6 +27,10 @@ class Devices:
     label_holder: PYU
     workers: List[PYU]
     heu: HEU
+
+
+def label_have_feature(devices: Devices):
+    return devices.label_holder in devices.workers
 
 
 class Component(abc.ABC):
@@ -87,3 +92,24 @@ class Composite(Component):
 def print_params(params):
     for field in fields(params):
         print(field.name, getattr(params, field.name))
+
+
+def set_params_from_dict(params, params_dict, key_words: List[str] = None):
+    if key_words is None:
+        for field in fields(params):
+            if field.name in params_dict:
+                setattr(params, field.name, params_dict[field.name])
+    else:
+        for field in fields(params):
+            if field.name in params_dict and field.name in key_words:
+                setattr(params, field.name, params_dict[field.name])
+
+
+def set_dict_from_params(params, params_dict, key_words: List[str] = None):
+    if key_words is None:
+        for field in fields(params):
+            params_dict[field.name] = getattr(params, field.name)
+    else:
+        for field in fields(params):
+            if field.name in key_words:
+                params_dict[field.name] = getattr(params, field.name)

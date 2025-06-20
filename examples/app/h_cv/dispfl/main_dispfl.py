@@ -26,14 +26,14 @@ import torch
 dispfl_root_path = os.path.abspath(os.path.join(os.getcwd()))
 sys.path.insert(0, dispfl_root_path)
 
-from .model.vgg import vgg11
-from .model.cnn_cifar10 import cnn_cifar10, cnn_cifar100
 from .core.dispfl_api_runner import DisPFLAPI, SfDisPFLAPI
+from .core.my_model_trainer import MyModelTrainer
 from .data.cifar10 import load_partition_data_cifar10
 from .data.cifar100.data_loader import load_partition_data_cifar100
 from .data.tiny_imagenet import load_partition_data_tiny
+from .model.cnn_cifar10 import cnn_cifar10, cnn_cifar100
 from .model.resnet import customized_resnet18, tiny_resnet18
-from .core.my_model_trainer import MyModelTrainer
+from .model.vgg import vgg11
 
 
 def add_args(parser):
@@ -237,6 +237,8 @@ def load_data(args, dataset_name, using_logger):
             args.batch_size,
             using_logger,
         )
+    else:
+        raise TypeError(f"unknown dataset: {dataset_name}")
 
     dataset = [
         train_data_num,
@@ -263,6 +265,9 @@ def create_model(args, model_name, class_num):
         model = tiny_resnet18(class_num=class_num)
     elif model_name == "vgg11":
         model = vgg11(class_num)
+    else:
+        raise TypeError(f"unknown model: {model_name}")
+
     return model
 
 

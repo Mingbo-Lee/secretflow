@@ -7,7 +7,7 @@ Please check [INSTALLATION.md](./docs/getting_started/installation.md) to build 
 
 Before start, please install required package for testing.
 ```sh
-pip install -r dev-requirements.txt
+pip install -r requirements.txt -r dev-requirements.txt
 ```
 
 There are two types in secretflow/tests.
@@ -93,3 +93,4 @@ Protocol Buffers resides at secretflow/protos.
 ```
 
 All generated Python code resides at secretflow/spec.
+

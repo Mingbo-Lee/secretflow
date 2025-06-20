@@ -36,9 +36,11 @@ def print_model_param_nums(model=None):
         model = torchvision.models.alexnet()
     total = sum(
         [
-            (param != 0).sum()
-            if len(param.size()) == 4 or len(param.size()) == 2
-            else 0
+            (
+                (param != 0).sum()
+                if len(param.size()) == 4 or len(param.size()) == 2
+                else 0
+            )
             for name, param in model.named_parameters()
         ]
     )
@@ -195,6 +197,9 @@ def count_model_param_flops(model=None, dataset=None, multiply_adds=True, full=F
     elif dataset == "tiny":
         input_channel = 3
         input_res = 64
+    else:
+        raise TypeError(f"unknown dataset: {dataset}")
+
     device = next(model.parameters()).device
     input = Variable(
         torch.rand(input_channel, input_res, input_res).unsqueeze(0), requires_grad=True

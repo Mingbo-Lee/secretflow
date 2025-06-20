@@ -47,20 +47,21 @@ class OrderMapManager(Component):
         self.logging_params = LoggingParams()
         self.buckets = eps_inverse(self.params.sketch_eps)
         self.order_map_actors = []
+        self.workers = []
 
     def show_params(self):
         print_params(self.params)
         print_params(self.logging_params)
 
     def set_params(self, params: Dict):
-        # validate
-        sketch = params.get('sketch_eps', default_params.sketch_eps)
-        self.params.sketch_eps = sketch
-        # derive attributes
-        self.buckets = eps_inverse(sketch)
-        self.params.seed = params.get('seed', default_params.seed)
+        if 'sketch_eps' in params:
+            self.params.sketch_eps = params['sketch_eps']
+            # derive attributes
+            self.buckets = eps_inverse(self.params.sketch_eps)
+        if 'seed' in params:
+            self.params.seed = params['seed']
 
-        self.logging_params = LoggingTools.logging_params_from_dict(params)
+        LoggingTools.logging_params_from_dict(params, self.logging_params)
 
     def get_params(self, params: dict):
         params['sketch_eps'] = self.params.sketch_eps
@@ -71,8 +72,12 @@ class OrderMapManager(Component):
     def set_devices(self, devices: Devices):
         self.workers = devices.workers
 
-    def set_actors(self, actors: SGBActor):
-        self.order_map_actors = actors
+    def set_actors(self, actors: List[SGBActor]):
+        assert len(self.workers) > 0, "workers must be set"
+        # worker actors only
+        self.order_map_actors = [
+            actor for actor in actors if actor.device in self.workers
+        ]
         for i, actor in enumerate(self.order_map_actors):
             actor.register_class('OrderMapActor', OrderMapActor, i)
 
@@ -143,16 +148,14 @@ class OrderMapManager(Component):
     def batch_compute_left_child_selects_each_party(
         self,
         split_feature_buckets_each_party: List[PYUObject],
-        sampled_indices: Union[PYUObject, List[int], None] = None,
+        sampled_indices: Union[List[int], None] = None,
     ) -> List[PYUObject]:
         return [
             actor.invoke_class_method(
                 'OrderMapActor',
                 'batch_compute_left_child_selects',
                 queries,
-                sampled_indices.to(actor.device)
-                if isinstance(sampled_indices, PYUObject)
-                else sampled_indices,
+                sampled_indices,
             )
             for actor, queries in zip(
                 self.order_map_actors, split_feature_buckets_each_party

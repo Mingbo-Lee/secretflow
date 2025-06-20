@@ -12,15 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import logging
 import os
-from secretflow.component.entry import COMP_LIST
-from secretflow.spec.v1.component_pb2 import AttrType, Attribute
+import sys
+
 from mdutils.mdutils import MdUtils
 
-import datetime
-
 this_directory = os.path.abspath(os.path.dirname(__file__))
+
+
+sys.path.append(os.path.join(this_directory, '../..'))
+
+from secretflow.component.core import get_comp_list_def
+from secretflow.spec.v1.component_pb2 import Attribute, AttrType
 
 mdFile = MdUtils(
     file_name=os.path.join(this_directory, 'comp_list.md'),
@@ -28,12 +32,10 @@ mdFile = MdUtils(
 
 mdFile.new_header(level=1, title='SecretFlow Component List', style='setext')
 
-mdFile.new_paragraph(f'Last update: {datetime.datetime.now().strftime("%c")}')
-mdFile.new_paragraph(f'Version: {COMP_LIST.version}')
-mdFile.new_paragraph(COMP_LIST.desc)
+mdFile.new_paragraph(f'Version: {get_comp_list_def().version}')
+mdFile.new_paragraph(get_comp_list_def().desc)
 
 AttrTypeStrMap = {
-    AttrType.ATTR_TYPE_UNSPECIFIED: 'Undefined',
     AttrType.AT_FLOAT: 'Float',
     AttrType.AT_INT: 'Integer',
     AttrType.AT_STRING: 'String',
@@ -43,8 +45,10 @@ AttrTypeStrMap = {
     AttrType.AT_STRINGS: 'String List',
     AttrType.AT_BOOLS: 'Boolean List',
     AttrType.AT_STRUCT_GROUP: 'Special type. Struct group. You must fill in all children.',
-    AttrType.AT_UNION_GROUP: 'Special type. Union group. You must select one children to fill in.',
-    AttrType.AT_SF_TABLE_COL: 'Special type. SecretFlow table column name.',
+    AttrType.AT_UNION_GROUP: 'Special type. Union group. You must select one child to fill in.',
+    AttrType.AT_CUSTOM_PROTOBUF: 'Special type. SecretFlow customized Protocol Buffers message.',
+    AttrType.AT_PARTY: 'Special type. Specify parties.',
+    AttrType.AT_COL_PARAMS: 'Special type. Specify local column selections.',
 }
 
 
@@ -61,7 +65,11 @@ def get_atomic_attr_value(at: AttrType, attr: Attribute):
         return [round(f, 5) for f in attr.fs]
     elif at == AttrType.AT_INTS:
         return list(attr.i64s)
-    elif at == AttrType.AT_STRINGS:
+    elif (
+        at == AttrType.AT_STRINGS
+        or at == AttrType.AT_PARTY
+        or at == AttrType.AT_COL_PARAMS
+    ):
         return list(attr.ss)
     elif at == AttrType.AT_BOOLS:
         return list(attr.bs)
@@ -113,35 +121,49 @@ def get_bound(
         return None
 
 
-def parse_comp_io(md, io_defs):
+def parse_comp_io(md, io_defs, is_input):
     io_table_text = ['Name', 'Description', 'Type(s)', 'Notes']
+    row_cnt = 1
     for io_def in io_defs:
+        row_cnt += 1
         notes_str = ''
         if len(io_def.attrs):
-            notes_str += "Extra table attributes."
-            for i, attr in enumerate(list(io_def.attrs)):
-                notes_str += f'({i}) {attr.name} - {attr.desc} '
-                if len(attr.types):
-                    notes_str += f"Accepted column types: {list(attr.types)}"
+            notes_str += "Pleae fill in extra table attributes."
+            io_table_text.extend(
+                [io_def.name, io_def.desc, str(list(io_def.types)), notes_str]
+            )
+            for _, attr in enumerate(list(io_def.attrs)):
+                col_attr_name = '/'.join(
+                    ['input' if is_input else 'output', io_def.name, attr.name]
+                )
+                col_attr_desc = attr.desc
 
+                col_notes_str = (
+                    f"You need to select some columns of table {io_def.name}. "
+                )
                 if attr.col_min_cnt_inclusive > 0:
-                    notes_str += f'Min column number to select(inclusive): {attr.col_min_cnt_inclusive}. '
+                    col_notes_str += f'Min column number to select(inclusive): {attr.col_min_cnt_inclusive}. '
                 if attr.col_max_cnt_inclusive > 0:
-                    notes_str += f'Max column number to select(inclusive): {attr.col_max_cnt_inclusive}. '
+                    col_notes_str += f'Max column number to select(inclusive): {attr.col_max_cnt_inclusive}. '
 
-                if len(attr.extra_attrs):
-                    raise NotImplementedError(
-                        'todo: parse extra_attrs of TableAttrDef.'
-                    )
-
-        io_table_text.extend(
-            [io_def.name, io_def.desc, str(list(io_def.types)), notes_str]
-        )
+                io_table_text.extend(
+                    [
+                        col_attr_name,
+                        col_attr_desc,
+                        'String List(Set value with other Component Attributes)',
+                        col_notes_str,
+                    ]
+                )
+                row_cnt += 1
+        else:
+            io_table_text.extend(
+                [io_def.name, io_def.desc, str(list(io_def.types)), notes_str]
+            )
 
     md.new_line()
     md.new_table(
         columns=4,
-        rows=len(io_defs) + 1,
+        rows=row_cnt,
         text=io_table_text,
         text_align='left',
     )
@@ -149,7 +171,7 @@ def parse_comp_io(md, io_defs):
 
 comp_map = {}
 
-for comp in COMP_LIST.comps:
+for comp in get_comp_list_def().comps:
     if comp.domain not in comp_map:
         comp_map[comp.domain] = {}
     comp_map[comp.domain][comp.name] = comp
@@ -169,6 +191,7 @@ for domain, comps in comp_map.items():
         mdFile.new_paragraph(f'Component version: {comp_def.version}')
         mdFile.new_paragraph(comp_def.desc)
 
+        actual_table_row_count = 0
         if len(comp_def.attrs):
             mdFile.new_header(
                 level=4,
@@ -176,6 +199,10 @@ for domain, comps in comp_map.items():
             )
             attr_table_text = ["Name", "Description", "Type", "Required", "Notes"]
             for attr in comp_def.attrs:
+                if attr.type not in AttrTypeStrMap:
+                    logging.warning(f'Ingoring attribute type: {attr}')
+                    continue
+                actual_table_row_count += 1
                 name_str = '/'.join(list(attr.prefixes) + [attr.name])
                 type_str = AttrTypeStrMap[attr.type]
                 required_str = 'N/A'
@@ -191,6 +218,9 @@ for domain, comps in comp_map.items():
                     AttrType.AT_INTS,
                     AttrType.AT_STRINGS,
                     AttrType.AT_BOOLS,
+                    AttrType.AT_CUSTOM_PROTOBUF,
+                    AttrType.AT_PARTY,
+                    AttrType.AT_COL_PARAMS,
                 ]:
                     if attr.type in [
                         AttrType.AT_FLOATS,
@@ -203,11 +233,14 @@ for domain, comps in comp_map.items():
                         if attr.atomic.list_max_length_inclusive > 0:
                             notes_str += f'Max length(inclusive): {attr.atomic.list_max_length_inclusive}. '
 
-                    default_value = get_atomic_attr_value(
-                        attr.type, attr.atomic.default_value
-                    )
-                    if default_value is not None:
-                        notes_str += f'Default: {default_value}. '
+                    if attr.atomic.is_optional:
+                        default_value = get_atomic_attr_value(
+                            attr.type, attr.atomic.default_value
+                        )
+                        if isinstance(default_value, str) and "\n" in default_value:
+                            default_value = default_value.replace("\n", "\\n")
+                            default_value = f"`{default_value}`"
+                        notes_str += f'Default: {default_value}.'
 
                     allowed_value = get_allowed_atomic_attr_value(
                         attr.type, attr.atomic.allowed_values
@@ -228,8 +261,18 @@ for domain, comps in comp_map.items():
                     )
                     if bound is not None:
                         notes_str += f'Range: {bound}. '
+                elif attr.type in [AttrType.AT_STRUCT_GROUP, AttrType.AT_UNION_GROUP]:
+                    notes_str += f"This is a special type. "
+                    if attr.type == AttrType.AT_STRUCT_GROUP:
+                        notes_str += f"This is a structure group, you must fill in all children. "
+                    elif attr.type == AttrType.AT_UNION_GROUP:
+                        notes_str += f"This is a union group, you must select one child to fill in (if exists)."
+                elif attr.type == AttrType.ATTR_TYPE_UNSPECIFIED:
+                    pass
                 else:
-                    raise NotImplementedError('todo: parse other attr types.')
+                    raise NotImplementedError(
+                        f'todo: parse other attr types: {attr.type}'
+                    )
 
                 attr_table_text.extend(
                     [name_str, attr.desc, type_str, required_str, notes_str.rstrip()]
@@ -238,7 +281,7 @@ for domain, comps in comp_map.items():
             mdFile.new_line()
             mdFile.new_table(
                 columns=5,
-                rows=len(comp_def.attrs) + 1,
+                rows=actual_table_row_count + 1,
                 text=attr_table_text,
                 text_align='left',
             )
@@ -249,13 +292,13 @@ for domain, comps in comp_map.items():
                 title='Inputs',
             )
 
-            parse_comp_io(mdFile, comp_def.inputs)
+            parse_comp_io(mdFile, comp_def.inputs, True)
         if len(comp_def.outputs):
             mdFile.new_header(
                 level=4,
                 title='Outputs',
             )
-            parse_comp_io(mdFile, comp_def.outputs)
+            parse_comp_io(mdFile, comp_def.outputs, False)
 
 
 mdFile.create_md_file()

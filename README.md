@@ -5,6 +5,8 @@
 ---
 
 [![CircleCI](https://dl.circleci.com/status-badge/img/gh/secretflow/secretflow/tree/main.svg?style=svg)](https://dl.circleci.com/status-badge/redirect/gh/secretflow/secretflow/tree/main)
+[![GoodFirstIssue](https://img.shields.io/badge/SecretFlow-Good%20First%20Issue-green)](https://github.com/orgs/secretflow/projects/12/)
+[![Contribution Map](https://img.shields.io/badge/SecretFlow-Contribution%20Map-1677FF)](https://github.com/orgs/secretflow/projects/11/)
 
 <p align="center">
 <a href="./README.zh-CN.md">简体中文</a>｜<a href="./README.md">English</a>
@@ -30,7 +32,6 @@ it provides:
   - [API Reference](https://www.secretflow.org.cn/docs/secretflow/en/api/index.html)
   - [Tutorial](https://www.secretflow.org.cn/docs/secretflow/en/tutorial/index.html)
 
-
 ## SecretFlow Related Projects
 
 - [Kuscia](https://github.com/secretflow/kuscia): A lightweight privacy-preserving computing task orchestration framework based on K3s.
@@ -53,10 +54,19 @@ We also provide a curated list of papers and SecretFlow's tutorials on Privacy-E
 
 Please check [AWESOME-PETS.md](./docs/awesome-pets/awesome-pets.md)
 
-
 ## Contributing
 
-Please check [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Contributor Rewards: Thank you for contributing to SecretFlow! All contributors will receive: A SecretFlow Open Source Contributor Certificate & An exclusive SecretFlow T-shirt 📌 [Apply Now](https://studio.secretflow.com/activity/fhelc1w2nmx0g0n/detail)
+
+### Good First Issues
+We have a list of [good first issues](https://github.com/orgs/secretflow/projects/12/). This is a great place for newcomers and beginners alike to get started, gain experience, and get familiar with our contribution process.
+
+### Contribution Map 
+We also welcome community collaboration on [more advanced initiatives](https://github.com/orgs/secretflow/projects/11/)! Whether you're refining features, optimizing workflows, or proposing new ideas – there are opportunities for contributors of all skill levels to shape SecretFlow's future. 
+
+## Benchmarks
+
+Please check [OVERALL_BENCHMARK.md](./docs/developer/benchmark/overall_benchmark.md)
 
 ## Disclaimer
 

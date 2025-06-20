@@ -14,8 +14,18 @@
 
 
 import os
+from enum import Enum
 
 import grpc
+import pyarrow.flight as flight
+from dataproxy.sdk import (
+    DataProxyConfig,
+    DataProxyFileAdapter,
+    DownloadInfo,
+    FileFormat,
+    TlSConfig,
+    UploadInfo,
+)
 from kuscia.proto.api.v1alpha1.datamesh.domaindata_pb2 import (
     CreateDomainDataRequest,
     DomainData,
@@ -29,6 +39,18 @@ from kuscia.proto.api.v1alpha1.datamesh.domaindatasource_pb2 import (
 from kuscia.proto.api.v1alpha1.datamesh.domaindatasource_pb2_grpc import (
     DomainDataSourceServiceStub,
 )
+
+DEFAULT_GENERIC_OPTIONS = [("GRPC_ARG_KEEPALIVE_TIME_MS", 60000)]
+
+DEFAULT_FLIGHT_CALL_OPTIONS = flight.FlightCallOptions(
+    timeout=10
+)  # timeout unit is second.
+
+
+class DataFileFormat(Enum):
+    CSV = 1
+    ORC = 2
+    BINARY = 3
 
 
 def create_channel(address: str):
@@ -51,8 +73,8 @@ def create_channel(address: str):
     return channel
 
 
-def create_domain_data_service_stub(address: str):
-    return DomainDataServiceStub(create_channel(address))
+def create_domain_data_service_stub(channel):
+    return DomainDataServiceStub(channel)
 
 
 def get_domain_data(stub: DomainDataServiceStub, id: str) -> DomainData:
@@ -63,7 +85,7 @@ def get_domain_data(stub: DomainDataServiceStub, id: str) -> DomainData:
     return ret.data
 
 
-def create_domain_data(stub: DomainDataServiceStub, data: DomainData):
+def create_domain_data_in_dm(stub: DomainDataServiceStub, data: DomainData):
     ret = stub.CreateDomainData(
         CreateDomainDataRequest(
             domaindata_id=data.domaindata_id,
@@ -79,13 +101,11 @@ def create_domain_data(stub: DomainDataServiceStub, data: DomainData):
     )
 
     if ret.status.code != 0:
-        raise RuntimeError(
-            f"create_domain_data failed for {data.domaindata_id}: status = {ret.status}"
-        )
+        raise RuntimeError(f"create_domain_data failed for {data} : ret = {ret}")
 
 
-def create_domain_data_source_service_stub(address: str):
-    return DomainDataSourceServiceStub(create_channel(address))
+def create_domain_data_source_service_stub(channel):
+    return DomainDataSourceServiceStub(channel)
 
 
 def get_domain_data_source(
@@ -94,8 +114,54 @@ def get_domain_data_source(
     ret = stub.QueryDomainDataSource(QueryDomainDataSourceRequest(datasource_id=id))
 
     if ret.status.code != 0:
-        raise RuntimeError(
-            f"get_domain_data_source failed for {id}: status = {ret.status}"
-        )
+        raise RuntimeError(f"get_domain_data_source failed for {id}: ret = {ret}")
 
     return ret.data
+
+
+def create_dm_flight_client(dm_address: str):
+    dp_config = DataProxyConfig(
+        data_proxy_addr=dm_address,
+        tls_config=TlSConfig(
+            certificate_path=os.environ.get("CLIENT_CERT_FILE", ''),
+            private_key_path=os.environ.get("CLIENT_PRIVATE_KEY_FILE", ''),
+            ca_file_path=os.environ.get("TRUSTED_CA_FILE", ''),
+        ),
+    )
+
+    return DataProxyFileAdapter(dp_config)
+
+
+def get_file_from_dp(
+    dm_flight_client,
+    domain_data_id: str,
+    output_file_path: str,
+    file_format: FileFormat,
+    partition_spec: str = "",
+):
+    download_info = DownloadInfo(
+        domaindata_id=domain_data_id,
+        partition_spec=partition_spec,
+    )
+
+    dm_flight_client.download_file(download_info, output_file_path, file_format)
+
+
+def put_file_to_dp(
+    dm_flight_client,
+    domaindata_id: str,
+    file_local_path: str,
+    file_format: FileFormat,
+    data: DomainData,
+):
+    upload_info = UploadInfo(
+        domaindata_id=domaindata_id,
+        name=data.name,
+        type=data.type,
+        datasource_id=data.datasource_id,
+        relative_uri=data.relative_uri,
+        attributes=data.attributes,
+        columns=data.columns,
+        vendor=data.vendor,
+    )
+    dm_flight_client.upload_file(upload_info, file_local_path, file_format)

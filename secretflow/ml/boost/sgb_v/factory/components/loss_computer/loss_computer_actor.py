@@ -16,11 +16,11 @@ from typing import Tuple
 
 import numpy as np
 
-
 from ....core.params import RegType
 from ....core.pure_numpy_ops.grad import (
     compute_gh_linear,
     compute_gh_logistic,
+    compute_gh_tweedie,
     compute_relative_scaling_factor,
     compute_sum_abs,
     scale,
@@ -36,14 +36,20 @@ class LossComputerActor:
         self.last_abs_g_cache = None
 
     def compute_gh(
-        self, y: np.ndarray, pred: np.ndarray, obj: RegType
+        self,
+        y: np.ndarray,
+        pred: np.ndarray,
+        obj: RegType,
+        tweedie_variance_power: float,
     ) -> Tuple[np.ndarray, np.ndarray]:
         if obj == RegType.Linear:
             g, h = compute_gh_linear(y, pred)
         elif obj == RegType.Logistic:
             g, h = compute_gh_logistic(y, pred)
+        elif obj == RegType.Tweedie:
+            g, h = compute_gh_tweedie(y, pred, tweedie_variance_power)
         else:
-            raise f"unknown objective {obj}"
+            raise TypeError(f"unknown objective {obj}")
         return g, h
 
     def compute_abs_sums(self, g: np.ndarray, h: np.ndarray):
@@ -61,29 +67,6 @@ class LossComputerActor:
         self.g_scale = compute_relative_scaling_factor(abs_g_sum, scaling)
         self.h_scale = compute_relative_scaling_factor(abs_h_sum, scaling)
         return
-
-    def check_abs_g_sum_early_stop(self, threshold: float) -> bool:
-        # early stopping happened, and this is known by all parties
-        abs_sum = self.abs_g_cache
-        if abs_sum is None:
-            return False
-        return abs_sum <= threshold
-
-    def check_abs_g_sum_change_ratio_early_stop(self, threshold: float) -> bool:
-        old = self.last_abs_g_cache
-        current_abs_sum = self.abs_g_cache
-        if old is None or current_abs_sum is None:
-            return False
-        return delta_ratio(old, current_abs_sum) <= threshold
-
-    def check_early_stop(
-        self, abs_sum_threshold: float, abs_sum_change_ratio_threshold: float
-    ) -> bool:
-        g_sum_es = self.check_abs_g_sum_early_stop(abs_sum_threshold)
-        g_sum_delta_es = self.check_abs_g_sum_change_ratio_early_stop(
-            abs_sum_change_ratio_threshold
-        )
-        return g_sum_es or g_sum_delta_es
 
     def scale_gh(
         self, g: np.ndarray, h: np.ndarray, enable_quantization: bool

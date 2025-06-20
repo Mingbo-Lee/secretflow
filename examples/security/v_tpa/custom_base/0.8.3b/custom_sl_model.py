@@ -23,6 +23,7 @@
 import logging
 import math
 import os
+import pdb
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 
 from multiprocess import cpu_count
@@ -34,14 +35,12 @@ from secretflow.data.ndarray import FedNdarray
 from secretflow.data.vertical import VDataFrame
 from secretflow.device import PYU, Device, reveal, wait
 from secretflow.device.device.pyu import PYUObject
-from secretflow.ml.nn.sl.strategy_dispatcher import dispatch_strategy
-from secretflow.security.privacy import DPStrategy
-from secretflow.utils.compressor import Compressor
 from secretflow.utils.random import global_random
+from secretflow_fl.ml.nn.sl.strategy_dispatcher import dispatch_strategy
+from secretflow_fl.security.privacy import DPStrategy
+from secretflow_fl.utils.compressor import Compressor
 
-# from secretflow.ml.nn import SLModel
 from .sl_model import SLModel
-import pdb
 
 
 class CustomSLModel(SLModel):
@@ -80,7 +79,7 @@ class CustomSLModel(SLModel):
         defense_args = kwargs.get("defense_args", {})
 
         # TODO: add argument `backend`
-        import secretflow.ml.nn.sl.backend.tensorflow.strategy  # noqa
+        import secretflow_fl.ml.nn.sl.backend.tensorflow.strategy  # noqa
 
         self._workers = {}
         for device, model in base_model_dict.items():
@@ -93,9 +92,9 @@ class CustomSLModel(SLModel):
                 builder_fuse=None if device != device_y else model_fuse,
                 compressor=compressor,
                 random_seed=random_seed,
-                dp_strategy=dp_strategy_dict.get(device, None)
-                if dp_strategy_dict
-                else None,
+                dp_strategy=(
+                    dp_strategy_dict.get(device, None) if dp_strategy_dict else None
+                ),
                 base_local_steps=kwargs.get("base_local_steps", 1),
                 fuse_local_steps=kwargs.get("fuse_local_steps", 1),
                 bound_param=kwargs.get("bound_param", 0.0),

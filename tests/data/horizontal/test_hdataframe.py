@@ -1,3 +1,17 @@
+# Copyright 2024 Ant Group Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,21 +23,27 @@ from secretflow.utils.simulation.datasets import load_iris
 
 
 @pytest.fixture(scope='function')
-def prod_env_and_data(sf_production_setup_devices):
+def prod_env_and_data(sf_production_setup_devices_ray):
     df_plain = load_iris(
-        parts=[sf_production_setup_devices.alice, sf_production_setup_devices.bob],
-        aggregator=PlainAggregator(sf_production_setup_devices.alice),
-        comparator=PlainComparator(sf_production_setup_devices.alice),
+        parts=[
+            sf_production_setup_devices_ray.alice,
+            sf_production_setup_devices_ray.bob,
+        ],
+        aggregator=PlainAggregator(sf_production_setup_devices_ray.alice),
+        comparator=PlainComparator(sf_production_setup_devices_ray.alice),
     )
     df_spu = load_iris(
-        parts=[sf_production_setup_devices.alice, sf_production_setup_devices.bob],
-        aggregator=SPUAggregator(sf_production_setup_devices.spu),
-        comparator=SPUComparator(sf_production_setup_devices.spu),
+        parts=[
+            sf_production_setup_devices_ray.alice,
+            sf_production_setup_devices_ray.bob,
+        ],
+        aggregator=SPUAggregator(sf_production_setup_devices_ray.spu),
+        comparator=SPUComparator(sf_production_setup_devices_ray.spu),
     )
-    df_alice = reveal(df_plain.partitions[sf_production_setup_devices.alice].data)
-    df_bob = reveal(df_plain.partitions[sf_production_setup_devices.bob].data)
+    df_alice = reveal(df_plain.partitions[sf_production_setup_devices_ray.alice].data)
+    df_bob = reveal(df_plain.partitions[sf_production_setup_devices_ray.bob].data)
 
-    yield sf_production_setup_devices, {
+    yield sf_production_setup_devices_ray, {
         "df_plain": df_plain,
         "df_spu": df_spu,
         "df_alice": df_alice,

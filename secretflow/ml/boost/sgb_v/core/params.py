@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum, unique
+
+import numpy as np
 
 
 @unique
 class RegType(Enum):
     Linear = 'linear'
     Logistic = 'logistic'
+    Tweedie = 'tweedie'
 
 
 class TreeGrowingMethod(Enum):
@@ -77,7 +80,7 @@ class SGBParams:
         range: [1, 16]
     'gamma': float. Greater than 0 means pre-pruning enabled.
         Gain less than it will not induce split node.
-        default: 0.1
+        default: 1.0
         range: [0, 10000]
     'seed': Pseudorandom number generator seed.
         default: 1212
@@ -100,17 +103,39 @@ class SGBParams:
         range: (0, 1]
     'objective': Specify the learning objective.
         default: 'logistic'
-        range: ['linear', 'logistic']
+        range: ['linear', 'logistic', 'tweedie']
     'base_score': The initial prediction score of all instances, global bias.
         default: 0
-    'early_stop_criterion_g_abs_sum': if sum(abs(g)) is lower than or equal to this threadshold, training will stop.
-        default: 0.0
-        range [0.0, inf)
-    'early_stop_criterion_g_abs_sum_change_ratio': if absolute g sum change ratio is lower than or equal to this threadshold, training will stop.
-        default: 0.0
-        range [0, 1]
     'tree_growing_method': how to grow tree?
         default: level-wise
+    'enable_packbits': bool. if true, turn on packbits transmission.
+        default: False
+    'eval_metric': str. evaluation metric name, must be one of 'roc_auc', 'tweedie_deviance', 'tweedie_nll', 'mse' or 'rmse'.
+        'tweedie_nll' means tweedie negative log likelihood.
+        Note if objective is not logistic, auc may not work.
+        default: 'roc_auc'
+    'enable_monitor': bool. whether enable model monitor call back.
+        default: False
+    'enable_early_stop': bool. whether enable early stop call back.
+        default: False
+    'validation_fraction': float. the fraction to use as the validation set.
+    Only effective if early stop enabled.
+        default: 0.1
+        range: (0, 1)
+    'stopping_rounds': int. if more than `stopping_rounds` consecutive rounds without improvement, training will stop.
+    Only effective if early stop enabled.
+        default: 1
+    'stopping_tolerance': float. if the difference between current score and past best score is smaller than this threshold,
+    then model is considered not inproving. Only effective if early stop enabled.
+        default: 0.001
+    'save_best_model': bool. whether save best model on validation set during training, only effective if early stop enabled.
+        default: False
+    'tweedie_variance_power': Parameter that controls the variance of the Tweedie distribution.
+        var(y) ~ E(y)^tweedie_variance_power
+        default: 1.5
+        range: (1, 2)
+        Set closer to 2 to shift towards a gamma distribution.
+        Set closer to 1 to shift towards a Poisson distribution.
     """
 
     # security or encryption related params
@@ -123,7 +148,7 @@ class SGBParams:
 
     # tree boosting params
     num_boost_round: int = 10
-    reg_lambda: float = 0.1
+    reg_lambda: float = 1.0
     learning_rate: float = 0.3
     # only effective if tree growing method is leaf wise
     max_leaf: int = 15
@@ -139,9 +164,21 @@ class SGBParams:
     sketch_eps: float = 0.1
     objective: RegType = RegType('logistic')
     base_score: float = 0.0
-    early_stop_criterion_g_abs_sum: float = 0.0
-    early_stop_criterion_g_abs_sum_change_ratio: float = 0.0
     tree_growing_method: TreeGrowingMethod = TreeGrowingMethod.LEVEL
+    enable_packbits: bool = False
+
+    # callback params
+    eval_metric: str = 'roc_auc'
+    enable_monitor: bool = False
+    enable_early_stop: bool = False
+    validation_fraction: float = 0.1
+    stopping_rounds: int = 1
+    stopping_tolerance: float = 0.0
+    save_best_model: bool = False
+
+    # objective-related
+    # tweedie specific parameter, only effective if objective is tweedie
+    tweedie_variance_power: float = 1.5
 
 
 default_params = SGBParams()
@@ -182,13 +219,17 @@ numeric_params_range = {
     'top_rate': (0, 1, False, False),
     'bottom_rate': (0, 1, False, False),
     'sketch_eps': (0, 1, False, True),
-    'early_stop_criterion_g_abs_sum': (0.0, float('inf'), True, False),
-    'early_stop_criterion_g_abs_sum_change_ratio': (0, 1, True, True),
+    'validation_fraction': (0, 1, False, False),
+    'stopping_rounds': (1, 1024, True, True),
+    'stopping_tolerance': (0, np.inf, True, False),
+    'tweedie_variance_power': (1, 2, False, False),
+    'base_score': (-10, 10, True, True),
 }
 
 categorical_params_options = {
     'objective': [e.value for e in RegType],
     'tree_growing_method': [e.value for e in TreeGrowingMethod],
+    'eval_metric': ['roc_auc', 'tweedie_deviance', 'tweedie_nll', 'mse', 'rmse'],
 }
 
 
@@ -222,7 +263,7 @@ def assert_numeric_parameter_in_range(param_name, value):
     {numeric_params_range[param_name]}, but got {value}"
 
 
-def assert_categorical_parameter_valie_option(param_name, value):
+def assert_categorical_parameter_valid_option(param_name, value):
     if param_name not in categorical_params_options:
         return
     assert is_categorical_parameter_valid_option(
@@ -230,6 +271,28 @@ def assert_categorical_parameter_valie_option(param_name, value):
     ), f"{param_name} is not in valid options, \
     its valid options are {categorical_params_options[param_name]},\
     but got {value}"
+
+
+def assert_parameter_combination_valid(params_dict):
+    if (
+        params_dict.get('enable_monitor', False)
+        or params_dict.get('enable_early_stop', False)
+    ) and 'eval_metric' in params_dict:
+        objective = params_dict.get('objective', 'logistic')
+        if objective == 'logistic':
+            assert (
+                params_dict['eval_metric'] == 'roc_auc'
+            ), f"when objective is logistic, eval_metric must be auc, got {params_dict['eval_metric']}"
+        if objective == 'tweedie':
+            assert params_dict['eval_metric'] in [
+                'tweedie_nll',
+                'tweedie_deviance',
+            ], f"when objective is tweedie, eval_metric must be tweedie_nll or tweedie_deviance, got {params_dict['eval_metric']}"
+        if objective == 'linear':
+            assert params_dict['eval_metric'] in [
+                'mse',
+                'rmse',
+            ], f"when objective is linear, eval_metric must be mse or rmse, got {params_dict['eval_metric']}"
 
 
 def get_unused_params(params) -> set:
@@ -248,7 +311,7 @@ def is_type_matched(param_name, value):
     our_type = type(value)
     if true_type == float:
         return our_type == int or our_type == float
-    return true_type == our_type
+    return isinstance(value, true_type)
 
 
 def type_and_range_check(params_dict):
@@ -257,9 +320,96 @@ def type_and_range_check(params_dict):
             assert is_type_matched(
                 param_name, value
             ), f"type not correct for {param_name}, \
-            expect {type(getattr(default_params, param_name))}, got {type(value)}"
+            expect {type(getattr(default_params, param_name))}, got {type(value)}, value is {value}"
             assert_numeric_parameter_in_range(param_name, value)
-            assert_categorical_parameter_valie_option(param_name, value)
+            assert_categorical_parameter_valid_option(param_name, value)
+
+    assert_parameter_combination_valid(params_dict)
+
+
+XGB_COMMON_PARAMS = [
+    'reg_lambda',
+    'seed',
+    'learning_rate',
+    'max_depth',
+    'gamma',
+    'base_score',
+    'tweedie_variance_power',
+]
+
+
+OBJ_CONVERSION_DICT = {
+    'binary:logistic': RegType.Logistic.value,
+    'reg:logistic': RegType.Logistic.value,
+    'reg:squarederror': RegType.Linear.value,
+    'reg:tweedie': RegType.Tweedie.value,
+}
+
+
+def objective_conversion_function(xgb_obj_str: str) -> RegType:
+    if xgb_obj_str in OBJ_CONVERSION_DICT:
+        return OBJ_CONVERSION_DICT[xgb_obj_str]
+    else:
+        raise ValueError("Unsupported objective")
+
+
+XGB_TO_SGB_PARAMS = {
+    'max_leaves': ('max_leaf', lambda x: x),
+    'max_bin': ('sketch_eps', lambda x: 1 / x),
+    'subsample': ('rowsample_by_tree', lambda x: x),
+    'colsample_bytree': ('colsample_by_tree', lambda x: x),
+    'lambda': ('reg_lambda', lambda x: x),
+    'eta': ('learning_rate', lambda x: x),
+    'min_split_loss': ('gamma', lambda x: x),
+    'n_estimators': ('num_boost_round', lambda x: x),
+    'random_state': ('seed', lambda x: x),
+    'early_stopping_rounds': ('stopping_rounds', lambda x: x),
+    'objective': ('objective', objective_conversion_function),
+}
+
+
+# eval metric conversion is not supported for now, maybe added later
+def xgb_params_converter(xgb_params: dict) -> dict:
+    """Convert params from xgboost to sgb params
+
+    Args:
+        xgb_params (dict): xgb_params in dictionary. suppose clf is a fitted xgb model, this can be obtained by clf.get_params()
+
+    Returns:
+        dict: dictionary that can be used for sgb
+    """
+    sgb_params = get_classic_XGB_params()
+    for k, v in xgb_params.items():
+        if v is None:
+            continue
+        if k in XGB_COMMON_PARAMS:
+            sgb_params[k] = v
+            continue
+        if k in XGB_TO_SGB_PARAMS:
+            sgb_key, func = XGB_TO_SGB_PARAMS[k]
+            sgb_params[sgb_key] = func(v)
+            if k == "early_stopping_rounds" and v > 0:
+                sgb_params['enable_early_stop'] = True
+                sgb_params['save_best_model'] = True
+            continue
+    sgb_params.update(
+        {
+            'wait_execution': False,
+            'first_tree_with_label_holder_feature': False,
+            'enable_quantization': False,
+            'enable_packbits': False,
+            'enable_monitor': True,
+        }
+    )
+    return sgb_params
+
+
+def apply_new_params(old_params: dict, new_params: dict) -> dict:
+    """Apply new params to old params"""
+    result_params = old_params
+    for k, v in new_params.items():
+        result_params[k] = v
+    return result_params
 
 
 if __name__ == '__main__':

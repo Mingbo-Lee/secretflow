@@ -20,16 +20,15 @@ from typing import List, Union
 import cloudpickle as pickle
 import jax.tree_util
 import numpy as np
-import ray
 import spu
-from heu import numpy as hnp
-from heu import phe
+from heu import numpy as hnp, phe
 
 import secretflow.distributed as sfd
 from secretflow.utils.errors import PartyNotFoundError
+from secretflow.distributed.ray_op import get_obj_ref
 
 from .base import Device, DeviceType
-from .spu import SPUIOInfo, SPUValueMeta
+from .spu import SPU_PROTOCOLS_MAP, SPUIOInfo, SPUValueMeta
 from .type_traits import (
     heu_datatype_to_numpy,
     heu_datatype_to_spu,
@@ -57,6 +56,14 @@ class HEUMoveConfig:
 
     heu_audit_log: str = None
     """file path to record audit log"""
+
+
+def process_data(item):
+    item = jax.tree_util.tree_map(
+        lambda x: get_obj_ref(x),
+        item,
+    )
+    return item
 
 
 class HEUActor:
@@ -92,10 +99,7 @@ class HEUActor:
 
     def getitem(self, data, item):
         """Delegate of hnp ndarray.__getitem___()"""
-        item = jax.tree_util.tree_map(
-            lambda x: ray.get(x) if isinstance(x, ray.ObjectRef) else x,
-            item,
-        )
+        item = process_data(item)
         item = jax.tree_util.tree_map(
             lambda x: x.tolist() if isinstance(x, np.ndarray) else x, item
         )
@@ -131,10 +135,7 @@ class HEUActor:
         assert (
             data.size > 0
         ), f"You cannot select sum an empty ndarray, data.shape={data.rows}x{data.cols}"
-        item = jax.tree_util.tree_map(
-            lambda x: ray.get(x) if isinstance(x, ray.ObjectRef) else x,
-            item,
-        )
+        item = process_data(item)
         item = jax.tree_util.tree_map(
             lambda x: x.tolist() if isinstance(x, np.ndarray) else x, item
         )
@@ -148,10 +149,7 @@ class HEUActor:
         assert (
             data.size > 0
         ), f"You cannot select sum an empty ndarray, data.shape={data.rows}x{data.cols}"
-        item = jax.tree_util.tree_map(
-            lambda x: ray.get(x) if isinstance(x, ray.ObjectRef) else x,
-            item,
-        )
+        item = process_data(item)
         item = jax.tree_util.tree_map(
             lambda x: x.tolist() if isinstance(x, np.ndarray) else x, item
         )
@@ -172,12 +170,6 @@ class HEUActor:
         assert (
             data.size > 0
         ), f"You cannot select sum an empty ndarray, data.shape={data.rows}x{data.cols}"
-
-        def process_data(x):
-            res = x
-            if isinstance(x, ray.ObjectRef):
-                res = ray.get(x)
-            return res
 
         subgroup_map = jax.tree_util.tree_map(process_data, subgroup_map)
         assert isinstance(
@@ -211,12 +203,6 @@ class HEUActor:
         assert (
             data.size > 0
         ), f"You cannot select sum an empty ndarray, data.shape={data.rows}x{data.cols}"
-
-        def process_data(x):
-            res = x
-            if isinstance(x, ray.ObjectRef):
-                res = ray.get(x)
-            return res
 
         subgroup_map = jax.tree_util.tree_map(process_data, subgroup_map)
         assert isinstance(
@@ -348,6 +334,9 @@ class HEUSkKeeper(HEUActor):
     def public_key(self):
         return self.hekit.public_key()
 
+    def secret_key(self):
+        return self.hekit.secret_key()
+
     def dump_pk(self, path):
         """Dump public key to the specified file."""
         pk = self.hekit.public_key()
@@ -462,7 +451,9 @@ class HEUEvaluator(HEUActor):
         bound = self.hekit.public_key().plaintext_bound() / phe.Plaintext(
             self.hekit.get_schema(), 2
         )
-        masks = [hnp.random.randint(-bound, bound, data.shape)]
+        masks = [
+            hnp.random.randint(-bound, bound, data.shape) for _ in evaluator_parties
+        ]
         data_with_mask: hnp.CiphertextArray = data
         for m in masks:
             data_with_mask = self.evaluator.sub(data_with_mask, m)
@@ -478,12 +469,12 @@ class HEUEvaluator(HEUActor):
             chunk.total_bytes = len(chunk.content)
             shares_chunk.append(chunk.SerializeToString())
 
-            meta = spu.spu_pb2.ValueMetaProto()
-            meta.visibility = spu.Visibility.VIS_SECRET
-            meta.data_type = heu_datatype_to_spu(self.cleartext_type)
-            meta.storage_type = f"semi2k.AShr<{spu.FieldType.Name(spu_field_type)}>"
-            meta.shape.dims.extend(tuple(mask.shape))
-            io_info = SPUIOInfo(0, 1, meta.SerializeToString())
+        meta = spu.spu_pb2.ValueMetaProto()
+        meta.visibility = spu.Visibility.VIS_SECRET
+        meta.data_type = heu_datatype_to_spu(self.cleartext_type)
+        meta.storage_type = f"{SPU_PROTOCOLS_MAP[spu_protocol]}.AShr<{spu.FieldType.Name(spu_field_type)}>"
+        meta.shape.dims.extend(tuple(mask.shape))
+        io_info = SPUIOInfo(0, 1, meta.SerializeToString())
 
         value_meta = SPUValueMeta(
             data.shape,
@@ -538,7 +529,7 @@ class HEU(Device):
     - HEU -> SPU: 将 HE 加密的数据转换成 Arithmetic Sharing 数据并存放到 SPU
     """
 
-    def __init__(self, config: dict, spu_field_type):
+    def __init__(self, config: dict, spu_field_type, spu_fxp_fraction_bits: int = 0):
         """Initialize HEU
 
         Args:
@@ -588,6 +579,8 @@ class HEU(Device):
 
             spu_field_type: Field type in spu,
                 Device.to operation requires the data scale of HEU to be aligned with SPU
+            spu_fxp_fraction_bits: Number of fraction bits of fixed-point number in spu,
+                if set, Device.to operation requires the data scale of HEU to be aligned with SPU
         """
         super().__init__(DeviceType.HEU)
 
@@ -602,6 +595,9 @@ class HEU(Device):
 
         self.cleartext_type = "DT_F32"
         default_scale = 1 << spu_fxp_precision(spu_field_type)
+        if spu_fxp_fraction_bits > 0:
+            default_scale = 1 << spu_fxp_fraction_bits
+
         assert 'he_parameters' in config, f"missing field 'he_parameters' in heu config"
         param: dict = config['he_parameters']
         schema = phe.parse_schema_type(param.get("schema", "paillier"))
@@ -689,7 +685,11 @@ class HEU(Device):
 
 
 def heu_from_base_config(
-    base_heu_config: dict, new_sk_keeper: str, new_evaluators: List[str]
+    base_heu_config: dict,
+    new_sk_keeper: str,
+    new_evaluators: List[str],
+    field_type: spu.spu_pb2.FieldType = spu.spu_pb2.FM64,
+    fxp_fraction_bits: int = 0,
 ):
     """Create a HEU from an existing heu config, except replacing it with new sk keeper and new evaluators"""
     heu_config = {
@@ -701,4 +701,4 @@ def heu_from_base_config(
             "key_pair": {"generate": {"bit_size": base_heu_config["key_size"]}},
         },
     }
-    return HEU((heu_config), spu.spu_pb2.FM64)
+    return HEU(heu_config, field_type, fxp_fraction_bits)

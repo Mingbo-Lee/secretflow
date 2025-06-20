@@ -33,11 +33,11 @@ from secretflow.data.ndarray import FedNdarray
 from secretflow.data.vertical import VDataFrame
 from secretflow.device import PYU, Device, reveal, wait
 from secretflow.device.device.pyu import PYUObject
-from secretflow.ml.nn.sl.agglayer.agg_layer import AggLayer
-from secretflow.ml.nn.sl.agglayer.agg_method import AggMethod
-from secretflow.ml.nn.sl.strategy_dispatcher import dispatch_strategy
-from secretflow.security.privacy import DPStrategy
+from secretflow_fl.security.privacy import DPStrategy
 from secretflow.utils.random import global_random
+from secretflow_fl.ml.nn.sl.agglayer.agg_layer import AggLayer
+from secretflow_fl.ml.nn.sl.agglayer.agg_method import AggMethod
+from secretflow_fl.ml.nn.sl.strategy_dispatcher import dispatch_strategy
 
 
 class CustomSLModel:
@@ -101,9 +101,9 @@ class CustomSLModel:
         defense_args = kwargs.get("defense_args", {})
 
         if backend.lower() == "tensorflow":
-            import secretflow.ml.nn.sl.backend.tensorflow.strategy  # noqa
+            import secretflow_fl.ml.nn.sl.backend.tensorflow.strategy  # noqa
         elif backend.lower() == "torch":
-            import secretflow.ml.nn.sl.backend.torch.strategy  # noqa
+            import secretflow_fl.ml.nn.sl.backend.torch.strategy  # noqa
         else:
             raise Exception(f"Invalid backend = {backend}")
         worker_list = list(base_model_dict.keys())
@@ -115,14 +115,16 @@ class CustomSLModel:
                 # strategy,
                 device_strategy_dict.get(device, "split_nn"),
                 backend=backend,
-                builder_base=base_model_dict[device]
-                if device in base_model_dict.keys()
-                else None,
+                builder_base=(
+                    base_model_dict[device]
+                    if device in base_model_dict.keys()
+                    else None
+                ),
                 builder_fuse=None if device != device_y else model_fuse,
                 random_seed=random_seed,
-                dp_strategy=dp_strategy_dict.get(device, None)
-                if dp_strategy_dict
-                else None,
+                dp_strategy=(
+                    dp_strategy_dict.get(device, None) if dp_strategy_dict else None
+                ),
                 device=device,
                 base_local_steps=kwargs.get("base_local_steps", 1),
                 fuse_local_steps=kwargs.get("fuse_local_steps", 1),
@@ -182,9 +184,11 @@ class CustomSLModel:
                 # in dataset builder mode, xi cannot be none, or else datasetbuilder in worker cannot parse label
                 xs = (
                     [
-                        xi.partitions[device].data  # xi is FedDataframe
-                        if isinstance(xi.partitions[device], PartitionBase)
-                        else xi.partitions[device]  # xi is FedNdarray
+                        (
+                            xi.partitions[device].data  # xi is FedDataframe
+                            if isinstance(xi.partitions[device], PartitionBase)
+                            else xi.partitions[device]
+                        )  # xi is FedNdarray
                         for xi in x
                     ]
                     if device in dataset_builder
@@ -285,7 +289,7 @@ class CustomSLModel:
             verbose: 0, 1. Verbosity mode
             callbacks: List of Callback or Dict[device, Callback]. Callback can be:
             - `keras.callbacks.Callback` for tensorflow backend
-            - `secretflow.ml.nn.sl.backend.torch.callback.Callback` for torch backend
+            - `from secretflow_fl.ml.nn.callbacks.callback.Callback` for torch backend
             validation_data: Data on which to validate
             shuffle: Whether shuffle dataset or not
             validation_freq: specifies how many training epochs to run before a new validation run is performed

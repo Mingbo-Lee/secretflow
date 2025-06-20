@@ -75,7 +75,7 @@ Example
 --------
 
 A local cluster(Standalone Mode) needs to be initialized as the running environment for this example.
-See `Deployment <../../getting_started/deployment.html>`_ and refer to the 'Cluster Mode'.
+See `Deployment <../../getting_started/deployment.md>`_ and refer to the 'Cluster Mode'.
 
 For more details about the APIs, see :py:meth:`~secretflow.ml.boost.ss_xgb_v.model.Xgb`
 
@@ -137,7 +137,7 @@ For more details about the APIs, see :py:meth:`~secretflow.ml.boost.ss_xgb_v.mod
     # wait IO finished
     wait([p.data for p in v_data.partitions.values()])
     wait([p.data for p in label_data.partitions.values()])
-    # split train data and test date
+    # split train data and test data
     random_state = 1234
     split_factor = 0.8
     v_train_data, v_test_data = train_test_split(v_data, train_size=split_factor, random_state=random_state)

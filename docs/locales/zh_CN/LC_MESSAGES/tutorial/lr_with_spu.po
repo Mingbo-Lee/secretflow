@@ -25,7 +25,7 @@ msgid ""
 "The following codes are demos only. It’s **NOT for production** due to "
 "system security concerns, please **DO NOT** use it directly in "
 "production."
-msgstr "以下代码仅作为示例，请勿在生产环境直接使用。"
+msgstr "注意： 以下代码仅供演示用途，在演示过程中可能会揭露部分信息。请勿直接将此示例代码用于实际生产环境中。在实际部署前，请根据您的具体需求和安全标准进行必要的修改和调整。"
 
 #: ../../tutorial/lr_with_spu.ipynb:31
 msgid ""
@@ -49,7 +49,7 @@ msgstr "学习目标："
 
 #: ../../tutorial/lr_with_spu.ipynb:36
 msgid "After doing this lab, you’ll know how to:"
-msgstr "完成本实验后，您将知道如何："
+msgstr "完成本实验后，您将知道："
 
 #: ../../tutorial/lr_with_spu.ipynb:38
 msgid "How to write a Logistic Regression trainning program with JAX."
@@ -214,7 +214,7 @@ msgstr "最后，让我们用 AUC 验证模型。"
 msgid ""
 "You may find the model from SPU training program achieve the same AUC as "
 "JAX program."
-msgstr "你可能会发现 SPU 训练程序中的模型达到了与 JAX 程序相同的 AUC。"
+msgstr "你可能会发现 SPU 训练程序中的模型达到了与 JAX 程序几乎相同的 AUC。"
 
 #: ../../tutorial/lr_with_spu.ipynb:757
 msgid "This is the end of lab."

@@ -33,12 +33,12 @@ AuthManager is the module responsible for authorization management.
 
 1. Download the docker image
 ```shell
-docker pull secretflow/authmanager-release-sim-ubuntu:latest
+docker pull secretflow/authmanager-ubuntu-sim-release:latest
 ```
 
 2. Enter the docker image
 ```shell
-docker run -it --net host secretflow/authmanager-release-sim-ubuntu:latest
+docker run -it --net host secretflow/authmanager-ubuntu-sim-release:latest
 ```
 
 3. (Optional) Configure TLS
@@ -48,7 +48,6 @@ AuthManager enables TLS by default. If you only use it for local simulation, you
 4. Start the service
 
 ```shell
-cd occlum_release
 occlum run /bin/auth-manager --config_path /host/config.yaml
 ```
 The default port is 8835. Feel free to modify the `port` in config.yaml if port conflicts.
@@ -115,15 +114,17 @@ def gen_data():
                            n_classes=num_classes)
     return x, y
 
-# Alice generates its samples.
-x_a, y_a = alice(gen_data(), num_returns=2)()
-# Bob generates its samples.
-x_b, y_b = alice(gen_data(), num_returns=2)()
-
 from secretflow.device import TEEU
 
 # mrenclave can be omitted in simulation mode.
+alice = sf.PYU('alice')
+bob = sf.PYU('bob')
 teeu = TEEU('carol', mr_enclave='')
+
+# Alice generates its samples.
+x_a, y_a = alice(gen_data, num_returns=2)()
+# Bob generates its samples.
+x_b, y_b = bob(gen_data, num_returns=2)()
 
 # Transfer data to teeu.
 x_a_teeu = x_a.to(teeu, allow_funcs=xgb_demo)
@@ -134,7 +135,7 @@ y_b_teeu = y_b.to(teeu, allow_funcs=xgb_demo)
 
 # Run xgb_demo.
 res = teeu(xgb_demo)([x_a_teeu, x_b_teeu], [y_a_teeu, y_b_teeu])
-
+error = sf.reveal(res)
 print(f'Train error: {error}')
 
 ```
@@ -167,7 +168,7 @@ First, you need to modify the configuration items in the code.
   - `host` is the listening address of the AuthManager service
   - `ca_cert` is the CA certificate address of AuthManager, if AuthManager does not start with TLS, no configuration is required.
 
-Suppose we save the code as demo.py, and then execute `python demo.py` on Alice's machine.
+Suppose we save the code as `demo.py`, and then execute `python demo.py` on Alice's machine.
 
 ```python
 import secretflow as sf
@@ -250,14 +251,17 @@ def gen_data():
                            n_classes=num_classes)
     return x, y
 
-# Alice generates its samples.
-x_a, y_a = alice(gen_data(), num_returns=2)()
-# Bob generates its samples.
-x_b, y_b = alice(gen_data(), num_returns=2)()
-
 from secretflow.device import TEEU
 
+# mrenclave can be omitted in simulation mode.
+alice = sf.PYU('alice')
+bob = sf.PYU('bob')
 teeu = TEEU('carol', mr_enclave='')
+
+# Alice generates its samples.
+x_a, y_a = alice(gen_data, num_returns=2)()
+# Bob generates its samples.
+x_b, y_b = bob(gen_data, num_returns=2)()
 
 # Transfer data to teeu.
 x_a_teeu = x_a.to(teeu, allow_funcs=xgb_demo)
@@ -268,7 +272,7 @@ y_b_teeu = y_b.to(teeu, allow_funcs=xgb_demo)
 
 # Run xgb_demo.
 res = teeu(xgb_demo)([x_a_teeu, x_b_teeu], [y_a_teeu, y_b_teeu])
-
+error = sf.reveal(res)
 print(f'Train error: {error}')
 
 ```
@@ -300,7 +304,7 @@ First, you need to modify the configuration items in the code.
 - `host` is the listening address of the AuthManager service
 - `ca_cert` is the CA certificate address of AuthManager, if AuthManager does not start tls, no configuration is required.
 
-Suppose we save the code as demo.py, and then execute `python demo.py` on Bob's machine.
+Suppose we save the code as `demo.py`, and then execute `python demo.py` on Bob's machine.
 
 ```python
 import secretflow as sf
@@ -383,14 +387,17 @@ def gen_data():
                            n_classes=num_classes)
     return x, y
 
-# Alice generates its samples.
-x_a, y_a = alice(gen_data(), num_returns=2)()
-# Bob generates its samples.
-x_b, y_b = alice(gen_data(), num_returns=2)()
-
 from secretflow.device import TEEU
 
+# mrenclave can be omitted in simulation mode.
+alice = sf.PYU('alice')
+bob = sf.PYU('bob')
 teeu = TEEU('carol', mr_enclave='')
+
+# Alice generates its samples.
+x_a, y_a = alice(gen_data, num_returns=2)()
+# Bob generates its samples.
+x_b, y_b = bob(gen_data, num_returns=2)()
 
 # Transfer data to teeu.
 x_a_teeu = x_a.to(teeu, allow_funcs=xgb_demo)
@@ -401,7 +408,7 @@ y_b_teeu = y_b.to(teeu, allow_funcs=xgb_demo)
 
 # Run xgb_demo.
 res = teeu(xgb_demo)([x_a_teeu, x_b_teeu], [y_a_teeu, y_b_teeu])
-
+error = sf.reveal(res)
 print(f'Train error: {error}')
 
 ```
@@ -509,14 +516,17 @@ def gen_data():
                            n_classes=num_classes)
     return x, y
 
-# Alice generates its samples.
-x_a, y_a = alice(gen_data(), num_returns=2)()
-# Bob generates its samples.
-x_b, y_b = alice(gen_data(), num_returns=2)()
-
 from secretflow.device import TEEU
 
+# mrenclave can be omitted in simulation mode.
+alice = sf.PYU('alice')
+bob = sf.PYU('bob')
 teeu = TEEU('carol', mr_enclave='')
+
+# Alice generates its samples.
+x_a, y_a = alice(gen_data, num_returns=2)()
+# Bob generates its samples.
+x_b, y_b = bob(gen_data, num_returns=2)()
 
 # Transfer data to teeu.
 x_a_teeu = x_a.to(teeu, allow_funcs=xgb_demo)
@@ -527,7 +537,7 @@ y_b_teeu = y_b.to(teeu, allow_funcs=xgb_demo)
 
 # Run xgb_demo.
 res = teeu(xgb_demo)([x_a_teeu, x_b_teeu], [y_a_teeu, y_b_teeu])
-
+error = sf.reveal(res)
 print(f'Train error: {error}')
 
 ```
@@ -539,7 +549,7 @@ cd /root/occlum_instance
 openssl genrsa -3 -out private_key.pem 3072
 openssl rsa -in private_key.pem -pubout -out public_key.pem
 occlum build --sgx-mode sim --sign-key private_key.pem
-occlum run /bin/python3.8 /root/demo.py
+occlum run /bin/python /root/demo.py
 ```
 
 You can check model file at `/root/occlum_instance/model.json` when finished.

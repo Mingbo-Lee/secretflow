@@ -11,28 +11,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Tuple, Union
 
 from secretflow.data import FedNdarray
 from secretflow.device import PYUObject
-from secretflow.ml.boost.core.data_preprocess import validate
+from secretflow.ml.boost.core.data_preprocess import (
+    validate,
+    validate_sample_weight,
+    validate_tweedie_label,
+)
+from secretflow.ml.boost.sgb_v.core.params import default_params
 
-from ..component import Component
+from ....core.params import RegType
+from ..component import Component, print_params
+
+
+@dataclass
+class DataPreprocessParams:
+    """
+    'objective': Specify the learning objective.
+        default: 'logistic'
+        range: ['linear', 'logistic', 'tweedie']
+    """
+
+    objective: RegType = default_params.objective
 
 
 class DataPreprocessor(Component):
     def __init__(self) -> None:
         super().__init__()
+        self.params = DataPreprocessParams()
 
     def show_params(self):
-        return
+        print_params(self.params)
 
-    def set_params(self, _):
-        return
+    def set_params(self, params: dict):
+        if 'objective' in params:
+            self.params.objective = RegType(params['objective'])
 
-    def get_params(self, _):
-        return
+    def get_params(self, params: dict):
+        params['objective'] = self.params.objective
 
     def set_devices(self, _):
         return
@@ -44,6 +63,13 @@ class DataPreprocessor(Component):
         return
 
     def validate(
-        self, dataset, label
-    ) -> Tuple[FedNdarray, Tuple[int, int], PYUObject, Tuple[int, int]]:
-        return validate(dataset, label)
+        self, dataset, label, sample_weight=None
+    ) -> Tuple[
+        FedNdarray, Tuple[int, int], PYUObject, Tuple[int, int], Union[None, PYUObject]
+    ]:
+        x, x_shape, y, y_shape = validate(dataset, label)
+        # tweedie regression only support non negative labels
+        if self.params.objective == RegType.Tweedie:
+            validate_tweedie_label(y)
+        w = validate_sample_weight(sample_weight, y_shape=y_shape)
+        return x, x_shape, y, y_shape, w

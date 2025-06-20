@@ -17,8 +17,6 @@ from typing import List
 
 import numpy as np
 
-from secretflow.utils import sigmoid as appr_sig
-
 
 def init_pred(base: float, samples: int) -> np.ndarray:
     shape = (samples, 1)
@@ -26,7 +24,10 @@ def init_pred(base: float, samples: int) -> np.ndarray:
 
 
 def sigmoid(pred: np.ndarray) -> np.ndarray:
-    return appr_sig.sr_sig(pred)
+    # Note that if you change the sigmoid calculation mode,
+    # please revise the logic at `secretflow/component/model_export/serving_utils/train_model_converter.py sgb_converter`
+    # simultaneously to keep the sigmoid calculation logic consistent for the online prediction
+    return 1 / (1 + np.exp(-pred))
 
 
 def predict_tree_weight(selects: List[np.ndarray], weights: np.ndarray) -> np.ndarray:

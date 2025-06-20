@@ -3,7 +3,6 @@
 # This file is distributed under the same license as the SecretFlow package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2023.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: SecretFlow \n"
@@ -59,7 +58,7 @@ msgid "一、测试机型"
 msgstr ""
 
 #: ../../developer/benchmark/ubpsi_benchmark.md:16
-msgid "Python：3.8"
+msgid "Python：3.10"
 msgstr ""
 
 #: ../../developer/benchmark/ubpsi_benchmark.md:17
